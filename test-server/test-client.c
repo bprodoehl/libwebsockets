@@ -241,6 +241,7 @@ static struct option options[] = {
 	{ "debug",      required_argument,      NULL, 'd' },
 	{ "port",	required_argument,	NULL, 'p' },
 	{ "ssl",	no_argument,		NULL, 's' },
+	{ "interface",	required_argument,	NULL, 'i' },
 	{ "version",	required_argument,	NULL, 'v' },
 	{ "undeflated",	no_argument,		NULL, 'u' },
 	{ "nomux",	no_argument,		NULL, 'n' },
@@ -385,8 +386,8 @@ bail:
 
 usage:
 	fprintf(stderr, "Usage: libwebsockets-test-client "
-				"<server address> [--port=<p>] "
+				"<server address> [--port=<p>] [-i <interface>]"
 				"[--ssl] [-k] [-v <ver>] "
-				"[-d <log bitfield>] [-l]\n");
+				"[-d <log bitfield>] [--longlived] [--nomux] [--undeflated]\n");
 	return 1;
 }

@@ -74,7 +74,7 @@
 	}
 #define lws_set_blocking_send(wsi) wsi->sock_send_blocking = TRUE
 #define lws_socket_is_valid(x) (!!x)
-#define LWS_SOCK_INVALID 0 
+#define LWS_SOCK_INVALID 0
 #include <winsock2.h>
 #include <windows.h>
 #include <tchar.h>
@@ -359,7 +359,7 @@ enum lws_connection_states {
 	WSI_STATE_RETURNED_CLOSE_ALREADY,
 	WSI_STATE_AWAITING_CLOSE_ACK,
 	WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE,
-	
+
 	WSI_STATE_HTTP2_AWAIT_CLIENT_PREFACE,
 	WSI_STATE_HTTP2_ESTABLISHED_PRE_SETTINGS,
 	WSI_STATE_HTTP2_ESTABLISHED,
@@ -418,7 +418,7 @@ enum connection_mode {
 
 	LWS_CONNMODE_WS_SERVING,
 	LWS_CONNMODE_WS_CLIENT,
-	
+
 	LWS_CONNMODE_HTTP2_SERVING,
 
 	/* transient, ssl delay hiding */
@@ -591,6 +591,13 @@ lws_libev_run(struct lws_context *context);
 #define LWS_IPV6_ENABLED(context) (0)
 #endif
 
+#if LWS_POSIX
+#define LWS_UNIX_DOMAIN_SOCKET_ENABLED(context) \
+	(context->options & LWS_SERVER_OPTION_UNIX_SOCK)
+#else
+#define LWS_UNIX_DOMAIN_SOCKET_ENABLED(context) (0)
+#endif
+
 enum uri_path_states {
 	URIPS_IDLE,
 	URIPS_SEEN_SLASH,
@@ -618,13 +625,13 @@ struct lws_fragments {
 };
 
 /* notice that these union members:
- * 
+ *
  *  hdr
  *  http
  *  http2
- * 
+ *
  * all have a pointer to allocated_headers struct as their first member.
- * 
+ *
  * It means for allocated_headers access, the three union paths can all be
  * used interchangeably to access the same data
  */
@@ -667,7 +674,7 @@ enum lws_http2_settings {
 	LWS_HTTP2_SETTINGS__INITIAL_WINDOW_SIZE,
 	LWS_HTTP2_SETTINGS__MAX_FRAME_SIZE,
 	LWS_HTTP2_SETTINGS__MAX_HEADER_LIST_SIZE,
-	
+
 	LWS_HTTP2_SETTINGS__COUNT /* always last */
 };
 
@@ -682,7 +689,7 @@ enum lws_http2_wellknown_frame_types {
 	LWS_HTTP2_FRAME_TYPE_GOAWAY,
 	LWS_HTTP2_FRAME_TYPE_WINDOW_UPDATE,
 	LWS_HTTP2_FRAME_TYPE_CONTINUATION,
-	
+
 	LWS_HTTP2_FRAME_TYPE_COUNT /* always last */
 };
 
@@ -704,22 +711,22 @@ struct http2_settings {
 };
 
 enum http2_hpack_state {
-	
+
 	/* optional before first header block */
 	HPKS_OPT_PADDING,
 	HKPS_OPT_E_DEPENDENCY,
 	HKPS_OPT_WEIGHT,
-	
+
 	/* header block */
 	HPKS_TYPE,
-	
+
 	HPKS_IDX_EXT,
-	
+
 	HPKS_HLEN,
 	HPKS_HLEN_EXT,
 
 	HPKS_DATA,
-	
+
 	/* optional after last header block */
 	HKPS_OPT_DISCARD_PADDING,
 };
@@ -749,7 +756,7 @@ struct hpack_dynamic_table {
 };
 
 struct _lws_http2_related {
-	/* 
+	/*
 	 * having this first lets us also re-use all HTTP union code
 	 * and in turn, http_mode_related has allocated headers in right
 	 * place so we can use the header apis on the wsi directly still
@@ -758,14 +765,14 @@ struct _lws_http2_related {
 
 	struct http2_settings my_settings;
 	struct http2_settings peer_settings;
-	
+
 	struct lws *parent_wsi;
 	struct lws *next_child_wsi;
 
 	struct hpack_dynamic_table *hpack_dyn_table;
-	
+
 	unsigned int count;
-	
+
 	/* frame */
 	unsigned int length;
 	unsigned int stream_id;
@@ -776,7 +783,7 @@ struct _lws_http2_related {
 	unsigned char padding;
 
 	unsigned char ping_payload[8];
-	
+
 	unsigned short round_robin_POLLOUT;
 	unsigned short count_POLLOUT_children;
 
@@ -797,7 +804,7 @@ struct _lws_http2_related {
 	unsigned int hpack_e_dep;
 	unsigned int huff:1;
 	unsigned int value:1;
-	
+
 	/* negative credit is mandated by the spec */
 	int tx_credit;
 	unsigned int my_stream_id;
@@ -967,13 +974,13 @@ lws_b64_selftest(void);
 LWS_EXTERN struct lws *
 wsi_from_fd(struct lws_context *context, lws_sockfd_type fd);
 
-LWS_EXTERN int 
+LWS_EXTERN int
 insert_wsi(struct lws_context *context, struct lws *wsi);
 
 LWS_EXTERN int
 delete_from_fd(struct lws_context *context, lws_sockfd_type fd);
 #else
-#define wsi_from_fd(A,B)  A->lws_lookup[B] 
+#define wsi_from_fd(A,B)  A->lws_lookup[B]
 #define insert_wsi(A,B)   A->lws_lookup[B->sock]=B
 #define delete_from_fd(A,B) A->lws_lookup[B]=0
 #endif
@@ -1249,7 +1256,7 @@ lws_handshake_server(struct lws_context *context,
 #define _lws_rx_flow_control(_a) (0)
 #define lws_handshake_server(_a, _b, _c, _d) (0)
 #endif
-	
+
 LWS_EXTERN int
 lws_get_addresses(struct lws_context *context, void *ads, char *name,
 		  int name_len, char *rip, int rip_len);

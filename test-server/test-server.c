@@ -116,6 +116,7 @@ static struct option options[] = {
 	{ "daemonize", 	no_argument,		NULL, 'D' },
 #endif
 	{ "resource_path", required_argument,	NULL, 'r' },
+	{ "host", required_argument,	NULL, 'H' },
 	{ NULL, 0, 0, 0 }
 };
 
@@ -125,6 +126,7 @@ int main(int argc, char **argv)
 	char interface_name[128] = "";
 	unsigned int ms, oldms = 0;
 	const char *iface = NULL;
+	const char *host = NULL;
 	char cert_path[1024];
 	char key_path[1024];
  	int debug_level = 7;
@@ -138,7 +140,7 @@ int main(int argc, char **argv)
  	int daemonize = 0;
 #endif
 
-	/* 
+	/*
 	 * take care to zero down the info struct, he contains random garbaage
 	 * from the stack otherwise
 	 */
@@ -146,7 +148,7 @@ int main(int argc, char **argv)
 	info.port = 7681;
 
 	while (n >= 0) {
-		n = getopt_long(argc, argv, "eci:hsap:d:Dr:", options, NULL);
+		n = getopt_long(argc, argv, "eci:hsap:d:Dr:H:", options, NULL);
 		if (n < 0)
 			continue;
 		switch (n) {
@@ -188,17 +190,41 @@ int main(int argc, char **argv)
 			resource_path = optarg;
 			printf("Setting resource path to \"%s\"\n", resource_path);
 			break;
+		case 'H':
+			host = optarg;
+			//printf("Setting host to \"%s\"\n", host);
+			{
+				int protocol_length;
+				// See if its a UNIX domain socket
+				protocol_length = strlen("unix://");
+				if (strlen(host) > protocol_length &&
+				    strncmp(host, "unix://", protocol_length) == 0) {
+					opts |= LWS_SERVER_OPTION_UNIX_SOCK;
+					strncpy(interface_name, host + protocol_length, sizeof interface_name);
+					interface_name[(sizeof interface_name) - 1] = '\0';
+					iface = interface_name;
+					printf("Using UNIX domain socket @ %s\n", iface);
+				}
+			}
+			break;
 		case 'h':
 			fprintf(stderr, "Usage: test-server "
-					"[--port=<p>] [--ssl] "
+					"[--port=<p>] [--ssl] [--allow-non-ssl] "
+					"[-i <interface>] "
+					"[--closetest] "
+					"[--libev] "
+#ifndef LWS_NO_DAEMONIZE
+					"[--daemonize] "
+#endif
 					"[-d <log bitfield>] "
-					"[--resource_path <path>]\n");
+					"[--resource_path <path>] "
+					"[--host <>]\n");
 			exit(1);
 		}
 	}
 
 #if !defined(LWS_NO_DAEMONIZE) && !defined(WIN32)
-	/* 
+	/*
 	 * normally lock path would be /var/lock/lwsts or similar, to
 	 * simplify getting started without having to take care about
 	 * permissions or running as root, set to /tmp/.lwsts-lock
@@ -240,7 +266,7 @@ int main(int argc, char **argv)
 #ifndef LWS_NO_EXTENSIONS
 	info.extensions = lws_get_internal_extensions();
 #endif
-	
+
 	info.ssl_cert_filepath = NULL;
 	info.ssl_private_key_filepath = NULL;
 

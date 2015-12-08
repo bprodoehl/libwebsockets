@@ -104,7 +104,7 @@ public:
 
 public:
 	TCPStream *ts;
-	
+
 public:
 	struct lws *wsi;
 	char buffer[BUFFER_SIZE];
@@ -144,7 +144,7 @@ extern "C" {
 #else
 #define LWS_POSIX 1
 #endif
-	
+
 #include "lws_config.h"
 
 #if defined(WIN32) || defined(_WIN32)
@@ -207,7 +207,7 @@ extern "C" {
 #ifndef LWS_EXTERN
 #define LWS_EXTERN extern
 #endif
-	
+
 #ifdef _WIN32
 #define random rand
 #else
@@ -304,6 +304,7 @@ enum lws_context_options {
 	LWS_SERVER_OPTION_DISABLE_IPV6 = 32,
 	LWS_SERVER_OPTION_DISABLE_OS_CA_CERTS = 64,
 	LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED = 128,
+	LWS_SERVER_OPTION_UNIX_SOCK = 256,
 };
 
 enum lws_callback_reasons {
@@ -348,7 +349,7 @@ enum lws_callback_reasons {
 	LWS_CALLBACK_UNLOCK_POLL,
 
 	LWS_CALLBACK_OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY,
-	
+
 	LWS_CALLBACK_USER = 1000, /* user code can use any including / above */
 };
 
@@ -442,11 +443,11 @@ enum lws_write_protocol {
 
 	/* Same as write_http but we know this write ends the transaction */
 	LWS_WRITE_HTTP_FINAL,
-	
+
 	/* HTTP2 */
 
 	LWS_WRITE_HTTP_HEADERS,
-	
+
 	/* flags */
 
 	LWS_WRITE_NO_FIN = 0x40,
@@ -518,7 +519,7 @@ enum lws_token_indexes {
 	WSI_TOKEN_HTTP_COLON_PATH,
 	WSI_TOKEN_HTTP_COLON_SCHEME,
 	WSI_TOKEN_HTTP_COLON_STATUS,
-	
+
 	WSI_TOKEN_HTTP_ACCEPT_CHARSET,
 	WSI_TOKEN_HTTP_ACCEPT_RANGES,
 	WSI_TOKEN_HTTP_ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -553,13 +554,13 @@ enum lws_token_indexes {
 	WSI_TOKEN_HTTP_VIA,
 	WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
 	WSI_TOKEN_PROXY,
-	
+
 	WSI_TOKEN_PATCH_URI,
 	WSI_TOKEN_PUT_URI,
 	WSI_TOKEN_DELETE_URI,
-	
+
 	WSI_TOKEN_HTTP_URI_ARGS,
-	
+
 	/* use token storage to stash these */
 
 	_WSI_TOKEN_CLIENT_SENT_PROTOCOLS,
@@ -567,7 +568,7 @@ enum lws_token_indexes {
 	_WSI_TOKEN_CLIENT_URI,
 	_WSI_TOKEN_CLIENT_HOST,
 	_WSI_TOKEN_CLIENT_ORIGIN,
-	
+
 	/* always last real token index*/
 	WSI_TOKEN_COUNT,
 	/* parser state additions */
@@ -829,7 +830,7 @@ struct lws_extension;
  *		receiving anything. Because this happens immediately after the
  *		network connection from the client, there's no websocket protocol
  *		selected yet so this callback is issued only to protocol 0.
- * 
+ *
  *	LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED: A new client just had
  *		been connected, accepted, and instantiated into the pool. This
  *		callback allows setting any relevant property to it. Because this
@@ -1186,7 +1187,7 @@ struct lws_extension {
  *		extensions this context supports.  If you configured with
  *		--without-extensions, you should give NULL here.
  * @token_limits: NULL or struct lws_token_limits pointer which is initialized
- *      with a token length limit for each possible WSI_TOKEN_*** 
+ *      with a token length limit for each possible WSI_TOKEN_***
  * @ssl_cert_filepath:	If libwebsockets was compiled to use ssl, and you want
  *			to listen using SSL, set to the filepath to fetch the
  *			server cert from, otherwise NULL for unencrypted
@@ -1201,7 +1202,7 @@ struct lws_extension {
  * @http_proxy_address: If non-NULL, attempts to proxy via the given address.
  *			If proxy auth is required, use format
  *			"username:password@server:port"
- * @http_proxy_port:	If http_proxy_address was non-NULL, uses this port at the address 
+ * @http_proxy_port:	If http_proxy_address was non-NULL, uses this port at the address
  * @gid:	group id to change to after setting listen socket, or -1.
  * @uid:	user id to change to after setting listen socket, or -1.
  * @options:	0, or LWS_SERVER_OPTION_DEFEAT_CLIENT_MASK
@@ -1218,6 +1219,8 @@ struct lws_extension {
  *		implementation for the one provided by provided_ssl_ctx.
  *		Libwebsockets no longer is responsible for freeing the context
  *		if this option is selected.
+ * @host: host string to listen on. unix:///var/run/lws/lws.sock for a unix
+ *		domain socket or tcp://0.0.0.0:8000 for a regular TCP socket
  */
 
 struct lws_context_creation_info {
@@ -1256,7 +1259,7 @@ lwsl_emit_syslog(int level, const char *line);
 
 LWS_VISIBLE LWS_EXTERN struct lws_context *
 lws_create_context(struct lws_context_creation_info *info);
-	
+
 LWS_VISIBLE LWS_EXTERN int
 lws_set_proxy(struct lws_context *context, const char *proxy);
 
@@ -1280,7 +1283,7 @@ lws_add_http_header_by_name(struct lws_context *context,
 			    int length,
 			    unsigned char **p,
 			    unsigned char *end);
-LWS_VISIBLE LWS_EXTERN int 
+LWS_VISIBLE LWS_EXTERN int
 lws_finalize_http_header(struct lws_context *context,
 			    struct lws *wsi,
 			    unsigned char **p,
@@ -1462,14 +1465,14 @@ lws_remaining_packet_payload(struct lws *wsi);
  * if the protocol does not have any guidance, returns -1.  Currently only
  * http2 connections get send window information from this API.  But your code
  * should use it so it can work properly with any protocol.
- * 
+ *
  * If nonzero return is the amount of payload data the peer or intermediary has
  * reported it has buffer space for.  That has NO relationship with the amount
  * of buffer space your OS can accept on this connection for a write action.
- * 
+ *
  * This number represents the maximum you could send to the peer or intermediary
  * on this connection right now without it complaining.
- * 
+ *
  * lws manages accounting for send window updates and payload writes
  * automatically, so this number reflects the situation at the peer or
  * intermediary dynamically.
