@@ -37,18 +37,20 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 		ads = context->http_proxy_address;
 
 #ifdef LWS_USE_IPV6
-		if (LWS_IPV6_ENABLED(context))
+		if (LWS_IPV6_ENABLED(context)) {
+			memset(&server_addr6, 0, sizeof(struct sockaddr_in6));
 			server_addr6.sin6_port = htons(context->http_proxy_port);
-		else
+		} else
 #endif
 			server_addr4.sin_port = htons(context->http_proxy_port);
 
 	} else {
 		ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
 #ifdef LWS_USE_IPV6
-		if (LWS_IPV6_ENABLED(context))
+		if (LWS_IPV6_ENABLED(context)) {
+			memset(&server_addr6, 0, sizeof(struct sockaddr_in6));
 			server_addr6.sin6_port = htons(wsi->u.hdr.ah->c_port);
-		else
+		} else
 #endif
 			server_addr4.sin_port = htons(wsi->u.hdr.ah->c_port);
 	}
@@ -61,6 +63,8 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 #ifdef LWS_USE_IPV6
 	if (LWS_IPV6_ENABLED(context)) {
 		memset(&hints, 0, sizeof(struct addrinfo));
+		hints.ai_family = AF_INET6;
+		hints.ai_flags = AI_V4MAPPED;
 		n = getaddrinfo(ads, NULL, &hints, &result);
 		if (n) {
 #ifdef _WIN32
@@ -73,16 +77,6 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 
 		server_addr6.sin6_family = AF_INET6;
 		switch (result->ai_family) {
-		case AF_INET:
-			/* map IPv4 to IPv6 */
-			bzero((char *)&server_addr6.sin6_addr,
-						sizeof(struct in6_addr));
-			server_addr6.sin6_addr.s6_addr[10] = 0xff;
-			server_addr6.sin6_addr.s6_addr[11] = 0xff;
-			memcpy(&server_addr6.sin6_addr.s6_addr[12],
-				&((struct sockaddr_in *)result->ai_addr)->sin_addr,
-							sizeof(struct in_addr));
-			break;
 		case AF_INET6:
 			memcpy(&server_addr6.sin6_addr,
 			  &((struct sockaddr_in6 *)result->ai_addr)->sin6_addr,
