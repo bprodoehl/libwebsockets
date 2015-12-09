@@ -195,7 +195,6 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 #endif
 #if LWS_POSIX
 #ifdef LWS_USE_UNIX_DOMAIN_SOCKET
-#error UNIX sockets enabled!
 	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context))
 		lwsl_notice(" Listening on UNIX domain socket %s\n", info->iface);
 	else
