@@ -30,7 +30,9 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 #endif
 #if LWS_POSIX
 	struct sockaddr_in serv_addr4;
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
 	struct sockaddr_un serv_unix;
+#endif
 	socklen_t len = sizeof(struct sockaddr);
 	struct sockaddr_in sin;
 	struct sockaddr *v;
@@ -50,9 +52,11 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 		sockfd = socket(AF_INET6, SOCK_STREAM, 0);
 	else
 #endif
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
 	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context))
 		sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	else
+#endif
 		sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (sockfd == -1) {
@@ -87,6 +91,7 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 		serv_addr6.sin6_port = htons(info->port);
 	} else
 #endif
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
 	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context)) {
 		struct stat st;
 		v = (struct sockaddr *)&serv_unix;
@@ -126,7 +131,9 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 				return 1;
 			}
 		}
-	} else {
+	} else
+#endif
+	{
 		v = (struct sockaddr *)&serv_addr4;
 		n = sizeof(serv_addr4);
 		bzero((char *) &serv_addr4, sizeof(serv_addr4));
@@ -187,9 +194,12 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 	mbed3_tcp_stream_bind(sockfd, info->port, wsi);
 #endif
 #if LWS_POSIX
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
+#error UNIX sockets enabled!
 	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context))
 		lwsl_notice(" Listening on UNIX domain socket %s\n", info->iface);
 	else
+#endif
 #endif
 	lwsl_notice(" Listening on port %d\n", info->port);
 

@@ -65,4 +65,7 @@
 /* whether to provide pre v1.6 compatibility wrappers */
 #cmakedefine LWS_WITH_OLD_API_WRAPPERS
 
+/* Build with support for UNIX domain sockets */
+#cmakedefine LWS_USE_UNIX_DOMAIN_SOCKET
+
 ${LWS_SIZEOFPTR_CODE}
