@@ -576,6 +576,13 @@ lws_libev_run(const struct lws_context *context);
 #define LWS_IPV6_ENABLED(context) (0)
 #endif
 
+#if LWS_POSIX
+#define LWS_UNIX_DOMAIN_SOCKET_ENABLED(context) \
+	(context->options & LWS_SERVER_OPTION_UNIX_SOCK)
+#else
+#define LWS_UNIX_DOMAIN_SOCKET_ENABLED(context) (0)
+#endif
+
 enum uri_path_states {
 	URIPS_IDLE,
 	URIPS_SEEN_SLASH,

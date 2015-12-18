@@ -273,6 +273,7 @@ enum lws_context_options {
 	LWS_SERVER_OPTION_DISABLE_IPV6 = 32,
 	LWS_SERVER_OPTION_DISABLE_OS_CA_CERTS = 64,
 	LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED = 128,
+	LWS_SERVER_OPTION_UNIX_SOCK = 256,
 
 	/****** add new things just above ---^ ******/
 };
@@ -1247,6 +1248,8 @@ struct lws_extension {
  *		implementation for the one provided by provided_ssl_ctx.
  *		Libwebsockets no longer is responsible for freeing the context
  *		if this option is selected.
+ * @host: host string to listen on. unix:///var/run/lws/lws.sock for a unix
+ *		domain socket or tcp://0.0.0.0:8000 for a regular TCP socket
  */
 
 struct lws_context_creation_info {

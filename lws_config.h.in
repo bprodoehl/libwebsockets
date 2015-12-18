@@ -68,4 +68,7 @@
 /* use SHA1() not internal libwebsockets_SHA1 */
 #cmakedefine LWS_SHA1_USE_OPENSSL_NAME
 
+/* Build with support for UNIX domain sockets */
+#cmakedefine LWS_USE_UNIX_DOMAIN_SOCKET
+
 ${LWS_SIZEOFPTR_CODE}
