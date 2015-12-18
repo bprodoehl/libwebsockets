@@ -4,9 +4,9 @@
 extern "C" void *mbed3_create_tcp_stream_socket(void)
 {
 	lws_conn_listener *srv = new lws_conn_listener;
-	
+
 	//lwsl_notice("%s: %p\r\n", __func__, (void *)srv);
-	
+
 	return (void *)srv;
 }
 
@@ -14,9 +14,9 @@ extern "C" void *mbed3_create_tcp_stream_socket(void)
 extern "C" void mbed3_delete_tcp_stream_socket(void *sock)
 {
 	lws_conn *conn = (lws_conn *)sock;
-	
+
 	conn->ts->close();
-	
+
 	lwsl_notice("%s: wsi %p: conn %p\r\n", __func__, (void *)conn->wsi, sock);
 	delete conn;
 }
@@ -26,7 +26,7 @@ void lws_conn::serialized_writeable(struct lws *_wsi)
 	struct lws *wsi = (struct lws *)_wsi;
 	struct lws_pollfd pollfd;
 	lws_conn *conn = (lws_conn *)wsi->sock;
-	
+
 	conn->awaiting_on_writeable = 0;
 
 	pollfd.fd = wsi->sock;
@@ -35,13 +35,13 @@ void lws_conn::serialized_writeable(struct lws *_wsi)
 
 	lwsl_debug("%s: wsi %p\r\n", __func__, (void *)wsi);
 
-	lws_service_fd(wsi->protocol->owning_server, &pollfd);
+	lws_service_fd(lws_get_context(wsi), &pollfd);
 }
 
 extern "C" void mbed3_tcp_stream_bind(void *sock, int port, struct lws *wsi)
 {
 	lws_conn_listener *srv = (lws_conn_listener *)sock;
-	
+
 	lwsl_debug("%s\r\n", __func__);
 	/* associate us with the listening wsi */
 	((lws_conn *)srv)->set_wsi(wsi);
@@ -63,7 +63,7 @@ lws_plat_change_pollfd(struct lws_context *context,
 		      struct lws *wsi, struct lws_pollfd *pfd)
 {
 	lws_conn *conn = (lws_conn *)wsi->sock;
-	
+
 	(void)context;
 	if (pfd->events & POLLOUT) {
 		conn->awaiting_on_writeable = 1;
@@ -72,25 +72,23 @@ lws_plat_change_pollfd(struct lws_context *context,
 			minar::Scheduler::postCallback(book.bind(wsi));
 			lwsl_debug("%s: wsi %p (booked callback)\r\n", __func__, (void *)wsi);
 		} else {
-			
+
 			lwsl_debug("%s: wsi %p (set awaiting_on_writeable)\r\n", __func__, (void *)wsi);
 		}
 	} else
 		conn->awaiting_on_writeable = 0;
-	
+
 	return 0;
 }
 
 extern "C" LWS_VISIBLE int
-lws_ssl_capable_read_no_ssl(struct lws_context *context,
-			    struct lws *wsi, unsigned char *buf, int len)
+lws_ssl_capable_read_no_ssl(struct lws *wsi, unsigned char *buf, int len)
 {
 	socket_error_t err;
 	size_t _len = len;
- 
+
 	lwsl_debug("%s\r\n", __func__);
-	
-	(void)context;
+
 	err = ((lws_conn *)wsi->sock)->ts->recv((char *)buf, &_len);
 	if (err == SOCKET_ERROR_NONE) {
 		lwsl_info("%s: got %d bytes\n", __func__, _len);
@@ -116,10 +114,10 @@ lws_ssl_capable_write_no_ssl(struct lws *wsi, unsigned char *buf, int len)
 	lws_conn *conn = (lws_conn *)wsi->sock;
 
 	lwsl_debug("%s: wsi %p: write %d (from %p)\n", __func__, (void *)wsi, len, (void *)buf);
-	
+
 	lwsl_debug("%s: wsi %p: clear writeable\n", __func__, (void *)wsi);
 	conn->writeable = 0;
-	
+
 	err = conn->ts->send((char *)buf, len);
 	if (err == SOCKET_ERROR_NONE)
 		return len;
@@ -160,19 +158,19 @@ void lws_conn_listener::start(const uint16_t port)
 void lws_conn::onRX(Socket *s)
 {
 	struct lws_pollfd pollfd;
-	
+
 	(void)s;
 
 	pollfd.fd = this;
 	pollfd.events = POLLIN;
 	pollfd.revents = POLLIN;
-	
+
 	lwsl_debug("%s: lws %p\n", __func__, wsi);
-	
-	lws_service_fd(wsi->protocol->owning_server, &pollfd);
+
+	lws_service_fd(lws_get_context(wsi), &pollfd);
 }
 
-/* 
+/*
  * this gets called from the OS when the TCPListener gets a connection that
  * needs accept()-ing.  LWS needs to run the associated flow.
  */
@@ -186,7 +184,7 @@ void lws_conn_listener::onIncoming(TCPListener *tl, void *impl)
 		onError(tl, SOCKET_ERROR_NULL_PTR);
 		return;
 	}
-	
+
 	conn = new(lws_conn);
 	if (!conn) {
 		lwsl_err("OOM\n");
@@ -196,12 +194,14 @@ void lws_conn_listener::onIncoming(TCPListener *tl, void *impl)
 	if (!conn->ts)
 		return;
 
-	/* 
+	conn->ts->setNagle(0);
+
+	/*
 	 * we use the listen socket wsi to get started, but a new wsi is
 	 * created.  mbed3_tcp_stream_accept() is also called from
 	 * here to bind the conn and new wsi together
 	 */
-	lws_server_socket_service(wsi->protocol->owning_server,
+	lws_server_socket_service(lws_get_context(wsi),
 				  wsi, (struct pollfd *)conn);
 
 	conn->ts->setOnError(TCPStream::ErrorHandler_t(conn, &lws_conn::onError));
@@ -216,7 +216,7 @@ void lws_conn_listener::onIncoming(TCPListener *tl, void *impl)
 }
 
 extern "C" LWS_VISIBLE struct lws *
-wsi_from_fd(struct lws_context *context, lws_sockfd_type fd)
+wsi_from_fd(const struct lws_context *context, lws_sockfd_type fd)
 {
 	lws_conn *conn = (lws_conn *)fd;
 	(void)context;
@@ -229,7 +229,7 @@ lws_plat_insert_socket_into_fds(struct lws_context *context,
 						       struct lws *wsi)
 {
 	(void)wsi;
-	lws_libev_io(context, wsi, LWS_EV_START | LWS_EV_READ);
+	lws_libev_io(wsi, LWS_EV_START | LWS_EV_READ);
 	context->fds[context->fds_count++].revents = 0;
 }
 
@@ -265,14 +265,14 @@ void lws_conn::onSent(Socket *s, uint16_t len)
 
 	(void)s;
 	(void)len;
-	
+
 	if (!awaiting_on_writeable) {
 		lwsl_debug("%s: wsi %p (setting writable=1)\r\n",
 			   __func__, (void *)wsi);
 		writeable = 1;
 		return;
 	}
-	
+
 	writeable = 1;
 
 	pollfd.fd = wsi->sock;
@@ -280,8 +280,8 @@ void lws_conn::onSent(Socket *s, uint16_t len)
 	pollfd.revents = POLLOUT;
 
 	lwsl_debug("%s: wsi %p (servicing now)\r\n", __func__, (void *)wsi);
-	
-	lws_service_fd(wsi->protocol->owning_server, &pollfd);
+
+	lws_service_fd(lws_get_context(wsi), &pollfd);
 }
 
 void lws_conn_listener::onError(Socket *s, socket_error_t err)
@@ -296,8 +296,7 @@ void lws_conn::onDisconnect(TCPStream *s)
 {
 	lwsl_notice("%s:\r\n", __func__);
 	(void)s;
-	lws_close_and_free_session(wsi->protocol->owning_server, wsi,
-						LWS_CLOSE_STATUS_NOSTATUS);
+	lws_close_free_wsi(wsi, LWS_CLOSE_STATUS_NOSTATUS);
 }
 
 

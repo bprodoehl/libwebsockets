@@ -75,6 +75,7 @@ LWS_VISIBLE struct lws_context *
 lws_create_context(struct lws_context_creation_info *info)
 {
 	struct lws_context *context = NULL;
+	struct lws wsi;
 #ifndef LWS_NO_DAEMONIZE
 	int pid_daemon = get_daemonize_pid();
 #endif
@@ -117,7 +118,7 @@ lws_create_context(struct lws_context_creation_info *info)
 		lwsl_notice(" Started with daemon pid %d\n", pid_daemon);
 	}
 #endif
-	context->listen_service_extraseen = 0;
+	context->lserv_seen = 0;
 	context->protocols = info->protocols;
 	context->token_limits = info->token_limits;
 	context->listen_port = info->port;
@@ -129,11 +130,14 @@ lws_create_context(struct lws_context_creation_info *info)
 	context->ka_interval = info->ka_interval;
 	context->ka_probes = info->ka_probes;
 
+	memset(&wsi, 0, sizeof(wsi));
+	wsi.context = context;
+
 	if (!info->ka_interval && info->ka_time > 0) {
 		lwsl_err("info->ka_interval can't be 0 if ka_time used\n");
 		return NULL;
 	}
-	
+
 #ifdef LWS_USE_LIBEV
 	/* (Issue #264) In order to *avoid breaking backwards compatibility*, we
 	 * enable libev mediated SIGINT handling with a default handler of
@@ -157,10 +161,7 @@ lws_create_context(struct lws_context_creation_info *info)
 		goto bail;
 	}
 
-	if (lws_plat_init_lookup(context))
-		goto bail;
-
-	if (lws_plat_init_fd_tables(context))
+	if (lws_plat_init(context, info))
 		goto bail;
 
 	lws_context_init_extensions(info, context);
@@ -209,33 +210,30 @@ lws_create_context(struct lws_context_creation_info *info)
 
 	for (context->count_protocols = 0;
 	     info->protocols[context->count_protocols].callback;
-	     context->count_protocols++) {
-		info->protocols[context->count_protocols].owning_server =
-									context;
-		info->protocols[context->count_protocols].protocol_index =
-						       context->count_protocols;
-
+	     context->count_protocols++)
 		/*
 		 * inform all the protocols that they are doing their one-time
-		 * initialization if they want to
+		 * initialization if they want to.
+		 *
+		 * NOTE the wsi is all zeros except for the context pointer
+		 * so lws_get_context(wsi) can work in the callback.
 		 */
-		info->protocols[context->count_protocols].callback(context,
-			       NULL, LWS_CALLBACK_PROTOCOL_INIT, NULL, NULL, 0);
-	}
+		info->protocols[context->count_protocols].callback(&wsi,
+				LWS_CALLBACK_PROTOCOL_INIT, NULL, NULL, 0);
 
 	/*
 	 * give all extensions a chance to create any per-context
 	 * allocations they need
 	 */
 	if (info->port != CONTEXT_PORT_NO_LISTEN) {
-		if (lws_ext_callback_for_each_extension_type(context, NULL,
+		if (lws_ext_cb_all_exts(context, NULL,
 			LWS_EXT_CALLBACK_SERVER_CONTEXT_CONSTRUCT, NULL, 0) < 0)
 			goto bail;
 	} else
-		if (lws_ext_callback_for_each_extension_type(context, NULL,
+		if (lws_ext_cb_all_exts(context, NULL,
 			LWS_EXT_CALLBACK_CLIENT_CONTEXT_CONSTRUCT, NULL, 0) < 0)
 			goto bail;
-		
+
 	return context;
 
 bail:
@@ -254,13 +252,17 @@ bail:
 LWS_VISIBLE void
 lws_context_destroy(struct lws_context *context)
 {
-	struct lws_protocols *protocol = NULL;
+	const struct lws_protocols *protocol = NULL;
+	struct lws wsi;
 	int n;
 
 	lwsl_notice("%s\n", __func__);
 
 	if (!context)
 		return;
+
+	memset(&wsi, 0, sizeof(wsi));
+	wsi.context = context;
 
 #ifdef LWS_LATENCY
 	if (context->worst_latency_info[0])
@@ -271,8 +273,7 @@ lws_context_destroy(struct lws_context *context)
 		struct lws *wsi = wsi_from_fd(context, context->fds[n].fd);
 		if (!wsi)
 			continue;
-		lws_close_and_free_session(context, wsi,
-				LWS_CLOSE_STATUS_NOSTATUS_CONTEXT_DESTROY
+		lws_close_free_wsi(wsi, LWS_CLOSE_STATUS_NOSTATUS_CONTEXT_DESTROY
 				/* no protocol close */);
 		n--;
 	}
@@ -282,10 +283,10 @@ lws_context_destroy(struct lws_context *context)
 	 * allocations they might have made
 	 */
 
-	n = lws_ext_callback_for_each_extension_type(context, NULL,
+	n = lws_ext_cb_all_exts(context, NULL,
 			LWS_EXT_CALLBACK_SERVER_CONTEXT_DESTRUCT, NULL, 0);
 
-	n = lws_ext_callback_for_each_extension_type(context, NULL,
+	n = lws_ext_cb_all_exts(context, NULL,
 			LWS_EXT_CALLBACK_CLIENT_CONTEXT_DESTRUCT, NULL, 0);
 
 	/*
@@ -295,7 +296,7 @@ lws_context_destroy(struct lws_context *context)
 	protocol = context->protocols;
 	if (protocol) {
 		while (protocol->callback) {
-			protocol->callback(context, NULL,
+			protocol->callback(&wsi,
 					   LWS_CALLBACK_PROTOCOL_DESTROY,
 					   NULL, NULL, 0);
 			protocol++;

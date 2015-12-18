@@ -1,25 +1,187 @@
 Changelog
 ---------
 
+v1.6.0-chrome48-firefox42
+=======================
+
+Major API improvements
+----------------------
+
+v1.6.0 has many cleanups and improvements in the API.  Although at first it
+looks pretty drastic, user code will only need four actions to update it.
+
+ - Do the three search/replaces in your user code, /libwebsocket_/lws_/,
+   /libwebsockets_/lws_/, and /struct\ libwebsocket/struct\ lws/
+
+ - Remove the context parameter from your user callbacks
+
+ - Remove context as the first parameter from the "Eleven APIS" listed in the
+   User Api Changes section
+
+ - Add lws_get_context(wsi) as the first parameter on the "Three APIS" listed
+   in the User Api Changes section, and anywhere else you still need context
+
+That's it... generally only a handful of the 14 affected APIs are actually in
+use in your user code and you can find them quickest by compiling and visiting
+the errors each in turn.  And the end results are much cleaner, more
+predictable and maintainable.
+
+
+User api additions
+------------------
+
+1) lws now exposes his internal platform file abstraction in a way that can be
+both used by user code to make it platform-agnostic, and be overridden or
+subclassed by user code.  This allows things like handling the URI "directory
+space" as a virtual filesystem that may or may not be backed by a regular
+filesystem.  One example use is serving files from inside large compressed
+archive storage without having to unpack anything except the file being
+requested.
+
+The test server shows how to use it, basically the platform-specific part of
+lws prepares a file operations structure that lives in the lws context.
+
+Helpers are provided to also leverage these platform-independent file handling
+apis
+
+static inline lws_filefd_type
+lws_plat_file_open(struct lws *wsi, const char *filename,
+		   unsigned long *filelen, int flags)
+static inline int
+lws_plat_file_close(struct lws *wsi, lws_filefd_type fd)
+
+static inline unsigned long
+lws_plat_file_seek_cur(struct lws *wsi, lws_filefd_type fd, long offset)
+
+static inline int
+lws_plat_file_read(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		   unsigned char *buf, unsigned long len)
+
+static inline int
+lws_plat_file_write(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		    unsigned char *buf, unsigned long len)
+		    
+The user code can also override or subclass the file operations, to either
+wrap or replace them.  An example is shown in test server.
+
+A wsi can be associated with the file activity, allowing per-connection
+authentication and state to be used when interpreting the file request.
+
+2) A new API void * lws_wsi_user(struct lws *wsi) lets you get the pointer to
+the user data associated with the wsi, just from the wsi.
+
+3) URI argument handling.  Libwebsockets parses and protects URI arguments
+like test.html?arg1=1&arg2=2, it decodes %xx uriencoding format and reduces
+path attacks like ../.../../etc/passwd so they cannot go behind the web
+server's /.  There is a list of confirmed attacks we're proof against in
+./test-server/attack.sh.
+
+There is a new API lws_hdr_copy_fragment that should be used now to access
+the URI arguments (it returns the fragments length)
+
+               while (lws_hdr_copy_fragment(wsi, buf, sizeof(buf),
+                                            WSI_TOKEN_HTTP_URI_ARGS, n) > 0) {
+                       lwsl_info("URI Arg %d: %s\n", ++n, buf);
+               }
+
+For the example above, calling with n=0 will return "arg1=1" and n=1 "arg2=2".
+All legal uriencodings will have been reduced in those strings.
+
+lws_hdr_copy_fragment() returns the length of the x=y fragment, so it's also
+possible to deal with arguments containing %00.  If you don't care about that,
+the returned string has '\0' appended to simplify processing.
+
+
 User api changes
 ----------------
 
-Several older apis start with libwebsocket_ or libwebsockets_ while newer ones
+1) Three APIS
+
+ - lws_callback_on_writable_all_protocol(const struct lws_protocols *protocol)
+ - lws_callback_all_protocol(const struct lws_protocols *protocol)
+ - lws_rx_flow_allow_all_protocol(lws_rx_flow_allow_all_protocol)
+
+Now take an additional pointer to the lws_context in their first argument.
+
+The reason for this change is struct lws_protocols has been changed to remove
+members that lws used for private storage: so the protocols struct in now
+truly const and may be reused serially or simultaneously by different contexts.
+
+2) Eleven APIs
+
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_by_name(struct lws_context *context,
+                struct lws *wsi,
+                const unsigned char *name,
+                const unsigned char *value,
+                int length,
+                unsigned char **p,
+                unsigned char *end);
+LWS_VISIBLE LWS_EXTERN int
+lws_finalize_http_header(struct lws_context *context,
+             struct lws *wsi,
+             unsigned char **p,
+             unsigned char *end);
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_by_token(struct lws_context *context,
+                 struct lws *wsi,
+                 enum lws_token_indexes token,
+                 const unsigned char *value,
+                 int length,
+                 unsigned char **p,
+                 unsigned char *end);
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_content_length(struct lws_context *context,
+                   struct lws *wsi,
+                   unsigned long content_length,
+                   unsigned char **p,
+                   unsigned char *end);
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_status(struct lws_context *context, struct lws *wsi,
+               unsigned int code, unsigned char **p,
+               unsigned char *end);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_serve_http_file(struct lws_context *context, struct lws *wsi,
+            const char *file, const char *content_type,
+            const char *other_headers, int other_headers_len);
+LWS_VISIBLE LWS_EXTERN int
+lws_serve_http_file_fragment(struct lws_context *context, struct lws *wsi);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_return_http_status(struct lws_context *context, struct lws *wsi,
+               unsigned int code, const char *html_body);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_callback_on_writable(const struct lws_context *context, struct lws *wsi);
+
+LWS_VISIBLE LWS_EXTERN void
+lws_get_peer_addresses(struct lws_context *context, struct lws *wsi,
+               lws_sockfd_type fd, char *name, int name_len,
+               char *rip, int rip_len);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_read(struct lws_context *context, struct lws *wsi,
+     unsigned char *buf, size_t len); 
+
+no longer require their initial struct lws_context * parameter.
+
+3) Several older apis start with libwebsocket_ or libwebsockets_ while newer ones
 all begin lws_.  These apis have been changed to all begin with lws_.
 
-However compatibility defines have been added in libwebsockets.h, so it is
-perfectly build-compatible with older sources using the old api names.
+To convert, search-replace
 
-If you are using lws with a distro, or otherwise can't rebuild the user code,
-you should add 
+ - libwebsockets_/lws_
+ - libwebsocket_/lws_
+ - struct\ libwebsocket/struct\ lws
+ 
+4) context parameter removed from user callback.
 
- -DLWS_WITH_OLD_API_WRAPPERS=1
+Since almost all apis no longer need the context as a parameter, it's no longer
+provided at the user callback directly.
 
-to your cmake args.  This builds lws with all the old apis as wrappers around
-the new apis, so the library still exports the old apis.
-
-In this way you can have lws export both the new and old apis simultaneously
-for compatibility.
+However if you need it, for ALL callbacks wsi is valid and has a valid context
+pointer you can recover using lws_get_context(wsi).
 
 
 v1.5-chrome47-firefox41

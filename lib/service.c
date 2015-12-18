@@ -22,15 +22,15 @@
 #include "private-libwebsockets.h"
 
 static int
-lws_calllback_as_writeable(struct lws_context *context, struct lws *wsi)
+lws_calllback_as_writeable(struct lws *wsi)
 {
 	int n;
 
 	switch (wsi->mode) {
-	case LWS_CONNMODE_WS_CLIENT:
+	case LWSCM_WS_CLIENT:
 		n = LWS_CALLBACK_CLIENT_WRITEABLE;
 		break;
-	case LWS_CONNMODE_WS_SERVING:
+	case LWSCM_WS_SERVING:
 		n = LWS_CALLBACK_SERVER_WRITEABLE;
 		break;
 	default:
@@ -38,14 +38,13 @@ lws_calllback_as_writeable(struct lws_context *context, struct lws *wsi)
 		break;
 	}
 	lwsl_info("%s: %p (user=%p)\n", __func__, wsi, wsi->user_space);
-	return user_callback_handle_rxflow(wsi->protocol->callback, context,
+	return user_callback_handle_rxflow(wsi->protocol->callback,
 					   wsi, (enum lws_callback_reasons) n,
 					   wsi->user_space, NULL, 0);
 }
 
 int
-lws_handle_POLLOUT_event(struct lws_context *context, struct lws *wsi,
-			 struct lws_pollfd *pollfd)
+lws_handle_POLLOUT_event(struct lws *wsi, struct lws_pollfd *pollfd)
 {
 	int write_type = LWS_WRITE_PONG;
 	struct lws_tokens eff_buf;
@@ -56,20 +55,19 @@ lws_handle_POLLOUT_event(struct lws_context *context, struct lws *wsi,
 
 	/* pending truncated sends have uber priority */
 
-	if (wsi->truncated_send_len) {
-		if (lws_issue_raw(wsi, wsi->truncated_send_malloc +
-				wsi->truncated_send_offset,
-						wsi->truncated_send_len) < 0) {
-			lwsl_info("lws_handle_POLLOUT_event signalling to close\n");
+	if (wsi->trunc_len) {
+		if (lws_issue_raw(wsi, wsi->trunc_alloc +
+				wsi->trunc_offset,
+						wsi->trunc_len) < 0) {
+			lwsl_info("%s signalling to close\n", __func__);
 			return -1;
 		}
 		/* leave POLLOUT active either way */
 		return 0;
 	} else
-		if (wsi->state == WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE) {
-			lwsl_info("***** %x signalling to close in POLLOUT handler\n", wsi);
+		if (wsi->state == LWSS_FLUSHING_STORED_SEND_BEFORE_CLOSE)
 			return -1; /* retry closing now */
-		}
+
 #ifdef LWS_USE_HTTP2
 	/* protocol packets are next */
 	if (wsi->pps) {
@@ -77,22 +75,22 @@ lws_handle_POLLOUT_event(struct lws_context *context, struct lws *wsi,
 		switch (wsi->pps) {
 		case LWS_PPS_HTTP2_MY_SETTINGS:
 		case LWS_PPS_HTTP2_ACK_SETTINGS:
-			lws_http2_do_pps_send(context, wsi);
+			lws_http2_do_pps_send(lws_get_context(wsi), wsi);
 			break;
 		default:
 			break;
 		}
 		wsi->pps = LWS_PPS_NONE;
 		lws_rx_flow_control(wsi, 1);
-		
+
 		return 0; /* leave POLLOUT active */
 	}
 #endif
 	/* pending control packets have next priority */
-	
-	if ((wsi->state == WSI_STATE_ESTABLISHED &&
+
+	if ((wsi->state == LWSS_ESTABLISHED &&
 	     wsi->u.ws.ping_pending_flag) ||
-	    (wsi->state == WSI_STATE_RETURNED_CLOSE_ALREADY &&
+	    (wsi->state == LWSS_RETURNED_CLOSE_ALREADY &&
 	     wsi->u.ws.payload_is_close)) {
 
 		if (wsi->u.ws.payload_is_close)
@@ -116,12 +114,12 @@ lws_handle_POLLOUT_event(struct lws_context *context, struct lws *wsi,
 
 	/* if we are closing, don't confuse the user with writeable cb */
 
-	if (wsi->state == WSI_STATE_RETURNED_CLOSE_ALREADY)
+	if (wsi->state == LWSS_RETURNED_CLOSE_ALREADY)
 		goto user_service;
-	
+
 	/* if nothing critical, user can get the callback */
-	
-	m = lws_ext_callback_for_each_active(wsi, LWS_EXT_CALLBACK_IS_WRITEABLE,
+
+	m = lws_ext_cb_wsi_active_exts(wsi, LWS_EXT_CALLBACK_IS_WRITEABLE,
 								       NULL, 0);
 #ifndef LWS_NO_EXTENSIONS
 	if (!wsi->extension_data_pending)
@@ -145,8 +143,8 @@ lws_handle_POLLOUT_event(struct lws_context *context, struct lws *wsi,
 		eff_buf.token_len = 0;
 
 		/* give every extension a chance to spill */
-		
-		m = lws_ext_callback_for_each_active(wsi,
+
+		m = lws_ext_cb_wsi_active_exts(wsi,
 					LWS_EXT_CALLBACK_PACKET_TX_PRESEND,
 							           &eff_buf, 0);
 		if (m < 0) {
@@ -213,28 +211,28 @@ user_service:
 
 	if (pollfd) {
 		if (lws_change_pollfd(wsi, LWS_POLLOUT, 0)) {
-			lwsl_info("failled at set pollfd\n");
+			lwsl_info("failed at set pollfd\n");
 			return 1;
 		}
 
-		lws_libev_io(context, wsi, LWS_EV_STOP | LWS_EV_WRITE);
+		lws_libev_io(wsi, LWS_EV_STOP | LWS_EV_WRITE);
 	}
 
 #ifdef LWS_USE_HTTP2
-	/* 
+	/*
 	 * we are the 'network wsi' for potentially many muxed child wsi with
 	 * no network connection of their own, who have to use us for all their
 	 * network actions.  So we use a round-robin scheme to share out the
 	 * POLLOUT notifications to our children.
-	 * 
+	 *
 	 * But because any child could exhaust the socket's ability to take
 	 * writes, we can only let one child get notified each time.
-	 * 
+	 *
 	 * In addition children may be closed / deleted / added between POLLOUT
 	 * notifications, so we can't hold pointers
 	 */
-	
-	if (wsi->mode != LWS_CONNMODE_HTTP2_SERVING) {
+
+	if (wsi->mode != LWSCM_HTTP2_SERVING) {
 		lwsl_info("%s: non http2\n", __func__);
 		goto notify;
 	}
@@ -244,7 +242,7 @@ user_service:
 		lwsl_info("pollout on uninitialized http2 conn\n");
 		return 0;
 	}
-	
+
 	lwsl_info("%s: doing children\n", __func__);
 
 	wsi2 = wsi;
@@ -256,33 +254,29 @@ user_service:
 		if (!wsi2->u.http2.requested_POLLOUT)
 			continue;
 		wsi2->u.http2.requested_POLLOUT = 0;
-		if (lws_calllback_as_writeable(context, wsi2)) {
+		if (lws_calllback_as_writeable(wsi2)) {
 			lwsl_debug("Closing POLLOUT child\n");
-			lws_close_and_free_session(context, wsi2,
-						LWS_CLOSE_STATUS_NOSTATUS);
+			lws_close_free_wsi(wsi2, LWS_CLOSE_STATUS_NOSTATUS);
 		}
 		wsi2 = wsi;
 	} while (wsi2 != NULL && !lws_send_pipe_choked(wsi));
-	
+
 	lwsl_info("%s: completed\n", __func__);
-	
+
 	return 0;
 notify:
 #endif
-	return lws_calllback_as_writeable(context, wsi);
+	return lws_calllback_as_writeable(wsi);
 }
 
-
-
 int
-lws_service_timeout_check(struct lws_context *context,
-			  struct lws *wsi, unsigned int sec)
+lws_service_timeout_check(struct lws *wsi, unsigned int sec)
 {
 	/*
 	 * if extensions want in on it (eg, we are a mux parent)
 	 * give them a chance to service child timeouts
 	 */
-	if (lws_ext_callback_for_each_active(wsi, LWS_EXT_CALLBACK_1HZ,
+	if (lws_ext_cb_wsi_active_exts(wsi, LWS_EXT_CALLBACK_1HZ,
 					     NULL, sec) < 0)
 		return 0;
 
@@ -304,8 +298,8 @@ lws_service_timeout_check(struct lws_context *context,
 		 * cleanup like flush partials.
 		 */
 		wsi->socket_is_permanently_unusable = 1;
-		lws_close_and_free_session(context, wsi,
-					   LWS_CLOSE_STATUS_NOSTATUS);
+		lws_close_free_wsi(wsi, LWS_CLOSE_STATUS_NOSTATUS);
+
 		return 1;
 	}
 
@@ -358,7 +352,7 @@ LWS_VISIBLE int
 lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 {
 #if LWS_POSIX
-	int listen_socket_fds_index = 0;
+	int idx = 0;
 #endif
 	lws_sockfd_type our_fd = 0;
 	struct lws_tokens eff_buf;
@@ -372,9 +366,8 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 	int more;
 
 #if LWS_POSIX
-	if (context->listen_service_fd)
-		listen_socket_fds_index = wsi_from_fd(context,
-			context->listen_service_fd)->position_in_fds_table;
+	if (context->lserv_fd)
+		idx = wsi_from_fd(context, context->lserv_fd)->position_in_fds_table;
 #endif
          /*
 	 * you can call us with pollfd = NULL to just allow the once-per-second
@@ -401,8 +394,7 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 			if (!wsi)
 				continue;
 
-			if (lws_service_timeout_check(context, wsi,
-						      (unsigned int)now))
+			if (lws_service_timeout_check(wsi, (unsigned int)now))
 				/* he did time out... */
 				if (mfd == our_fd)
 					/* it was the guy we came to service! */
@@ -433,44 +425,37 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 #if LWS_POSIX
 	/*
 	 * deal with listen service piggybacking
-	 * every listen_service_modulo services of other fds, we
+	 * every lserv_mod services of other fds, we
 	 * sneak one in to service the listen socket if there's anything waiting
 	 *
 	 * To handle connection storms, as found in ab, if we previously saw a
 	 * pending connection here, it causes us to check again next time.
 	 */
 
-	if (context->listen_service_fd && pollfd !=
-				       &context->fds[listen_socket_fds_index]) {
-		context->listen_service_count++;
-		if (context->listen_service_extraseen ||
-				context->listen_service_count ==
-					       context->listen_service_modulo) {
-			context->listen_service_count = 0;
+	if (context->lserv_fd && pollfd != &context->fds[idx]) {
+		context->lserv_count++;
+		if (context->lserv_seen ||
+		    context->lserv_count == context->lserv_mod) {
+			context->lserv_count = 0;
 			m = 1;
-			if (context->listen_service_extraseen > 5)
+			if (context->lserv_seen > 5)
 				m = 2;
 			while (m--) {
 				/*
 				 * even with extpoll, we prepared this
 				 * internal fds for listen
 				 */
-				n = lws_poll_listen_fd(
-					&context->fds[listen_socket_fds_index]);
-				if (n > 0) { /* there's a conn waiting for us */
-					lws_service_fd(context,
-						&context->
-						  fds[listen_socket_fds_index]);
-					context->listen_service_extraseen++;
-				} else {
-					if (context->listen_service_extraseen)
-						context->
-						     listen_service_extraseen--;
+				n = lws_poll_listen_fd(&context->fds[idx]);
+				if (n <= 0) {
+					if (context->lserv_seen)
+						context->lserv_seen--;
 					break;
 				}
+				/* there's a conn waiting for us */
+				lws_service_fd(context, &context->fds[idx]);
+				context->lserv_seen++;
 			}
 		}
-
 	}
 
 	/* handle session socket closed */
@@ -483,15 +468,21 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 
 		goto close_and_handled;
 	}
+
+#ifdef _WIN32
+	if (pollfd->revents & LWS_POLLOUT)
+		wsi->sock_send_blocking = FALSE;
+#endif
+
 #endif
 
 	/* okay, what we came here to do... */
 
 	switch (wsi->mode) {
-	case LWS_CONNMODE_HTTP_SERVING:
-	case LWS_CONNMODE_HTTP_SERVING_ACCEPTED:
-	case LWS_CONNMODE_SERVER_LISTENER:
-	case LWS_CONNMODE_SSL_ACK_PENDING:
+	case LWSCM_HTTP_SERVING:
+	case LWSCM_HTTP_SERVING_ACCEPTED:
+	case LWSCM_SERVER_LISTENER:
+	case LWSCM_SSL_ACK_PENDING:
 		n = lws_server_socket_service(context, wsi, pollfd);
 		if (n) /* closed by above */
 			return 1;
@@ -500,21 +491,21 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 			goto handle_pending;
 		goto handled;
 
-	case LWS_CONNMODE_WS_SERVING:
-	case LWS_CONNMODE_WS_CLIENT:
-	case LWS_CONNMODE_HTTP2_SERVING:
+	case LWSCM_WS_SERVING:
+	case LWSCM_WS_CLIENT:
+	case LWSCM_HTTP2_SERVING:
 
 		/* the guy requested a callback when it was OK to write */
 
 		if ((pollfd->revents & LWS_POLLOUT) &&
-		    (wsi->state == WSI_STATE_ESTABLISHED ||
-		     wsi->state == WSI_STATE_HTTP2_ESTABLISHED ||
-		     wsi->state == WSI_STATE_HTTP2_ESTABLISHED_PRE_SETTINGS ||
-		     wsi->state == WSI_STATE_RETURNED_CLOSE_ALREADY ||
-		     wsi->state == WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE) &&
-			   lws_handle_POLLOUT_event(context, wsi, pollfd)) {
-			if (wsi->state == WSI_STATE_RETURNED_CLOSE_ALREADY)
-				wsi->state = WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE;
+		    (wsi->state == LWSS_ESTABLISHED ||
+		     wsi->state == LWSS_HTTP2_ESTABLISHED ||
+		     wsi->state == LWSS_HTTP2_ESTABLISHED_PRE_SETTINGS ||
+		     wsi->state == LWSS_RETURNED_CLOSE_ALREADY ||
+		     wsi->state == LWSS_FLUSHING_STORED_SEND_BEFORE_CLOSE) &&
+			   lws_handle_POLLOUT_event(wsi, pollfd)) {
+			if (wsi->state == LWSS_RETURNED_CLOSE_ALREADY)
+				wsi->state = LWSS_FLUSHING_STORED_SEND_BEFORE_CLOSE;
 			lwsl_info("lws_service_fd: closing\n");
 			goto close_and_handled;
 		}
@@ -536,10 +527,10 @@ lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd)
 			break;
 read:
 
-		eff_buf.token_len = lws_ssl_capable_read(context, wsi,
-					context->service_buffer,
+		eff_buf.token_len = lws_ssl_capable_read(wsi,
+					context->serv_buf,
 					pending ? pending :
-					sizeof(context->service_buffer));
+					sizeof(context->serv_buf));
 		switch (eff_buf.token_len) {
 		case 0:
 			lwsl_info("service_fd: closing due to 0 length read\n");
@@ -565,13 +556,13 @@ read:
 		 * used then so it is efficient.
 		 */
 
-		eff_buf.token = (char *)context->service_buffer;
+		eff_buf.token = (char *)context->serv_buf;
 drain:
 
 		do {
 			more = 0;
-			
-			m = lws_ext_callback_for_each_active(wsi,
+
+			m = lws_ext_cb_wsi_active_exts(wsi,
 				LWS_EXT_CALLBACK_PACKET_RX_PREPARSE, &eff_buf, 0);
 			if (m < 0)
 				goto close_and_handled;
@@ -581,9 +572,8 @@ drain:
 			/* service incoming data */
 
 			if (eff_buf.token_len) {
-				n = lws_read(context, wsi,
-					(unsigned char *)eff_buf.token,
-							    eff_buf.token_len);
+				n = lws_read(wsi, (unsigned char *)eff_buf.token,
+					     eff_buf.token_len);
 				if (n < 0) {
 					/* we closed wsi */
 					n = 0;
@@ -598,15 +588,15 @@ drain:
 		pending = lws_ssl_pending(wsi);
 		if (pending) {
 handle_pending:
-			pending = pending > sizeof(context->service_buffer) ?
-				sizeof(context->service_buffer) : pending;
+			pending = pending > sizeof(context->serv_buf) ?
+				sizeof(context->serv_buf) : pending;
 			goto read;
 		}
 
 		if (draining_flow && wsi->rxflow_buffer &&
 				 wsi->rxflow_pos == wsi->rxflow_len) {
 			lwsl_info("flow buffer: drained\n");
-			lws_free2(wsi->rxflow_buffer);
+			lws_free_set_NULL(wsi->rxflow_buffer);
 			/* having drained the rxflow buffer, can rearm POLLIN */
 #ifdef LWS_NO_SERVER
 			n =
@@ -631,8 +621,8 @@ handle_pending:
 
 close_and_handled:
 	lwsl_debug("Close and handled\n");
-	lws_close_and_free_session(context, wsi, LWS_CLOSE_STATUS_NOSTATUS);
-	/* 
+	lws_close_free_wsi(wsi, LWS_CLOSE_STATUS_NOSTATUS);
+	/*
 	 * pollfd may point to something else after the close
 	 * due to pollfd swapping scheme on delete on some platforms
 	 * we can't clear revents now because it'd be the wrong guy's revents

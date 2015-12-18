@@ -64,17 +64,15 @@ enum demo_protocols {
 };
 
 
-/* 
+/*
  * dumb_increment protocol
- * 
+ *
  * since this also happens to be protocols[0], some callbacks that are not
  * bound to a specific protocol also turn up here.
  */
 
 static int
-callback_dumb_increment(struct lws_context *this,
-			struct lws *wsi,
-			enum lws_callback_reasons reason,
+callback_dumb_increment(struct lws *wsi, enum lws_callback_reasons reason,
 			void *user, void *in, size_t len)
 {
 	switch (reason) {
@@ -133,9 +131,7 @@ callback_dumb_increment(struct lws_context *this,
 
 
 static int
-callback_lws_mirror(struct lws_context *context,
-		    struct lws *wsi,
-		    enum lws_callback_reasons reason,
+callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
 		    void *user, void *in, size_t len)
 {
 	unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + 4096 +
@@ -149,7 +145,7 @@ callback_lws_mirror(struct lws_context *context,
 
 		lwsl_notice("mirror: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
 
-		lws_get_random(context, rands, sizeof(rands[0]));
+		lws_get_random(lws_get_context(wsi), rands, sizeof(rands[0]));
 		mirror_lifetime = 16384 + (rands[0] & 65535);
 		/* useful to test single connection stability */
 		if (longlived)
@@ -167,7 +163,7 @@ callback_lws_mirror(struct lws_context *context,
 		 * start the ball rolling,
 		 * LWS_CALLBACK_CLIENT_WRITEABLE will come next service
 		 */
-		lws_callback_on_writable(context, wsi);
+		lws_callback_on_writable(wsi);
 		break;
 
 	case LWS_CALLBACK_CLOSED:
@@ -177,7 +173,7 @@ callback_lws_mirror(struct lws_context *context,
 
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		for (n = 0; n < 1; n++) {
-			lws_get_random(context, rands, sizeof(rands));
+			lws_get_random(lws_get_context(wsi), rands, sizeof(rands));
 			l += sprintf((char *)&buf[LWS_SEND_BUFFER_PRE_PADDING + l],
 					"c #%06X %d %d %d;",
 					(int)rands[0] & 0xffffff,
@@ -201,7 +197,7 @@ callback_lws_mirror(struct lws_context *context,
 			return -1;
 		}
 		/* get notified as soon as we can write again */
-		lws_callback_on_writable(context, wsi);
+		lws_callback_on_writable(wsi);
 		break;
 
 	default:

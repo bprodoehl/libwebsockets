@@ -31,6 +31,7 @@ int count_pollfds;
 #endif
 volatile int force_exit = 0;
 struct lws_context *context;
+struct lws_plat_file_ops fops_plat;
 
 /* http server gets files from this path */
 #define LOCAL_RESOURCE_PATH INSTALL_DATADIR"/libwebsockets-test-server"
@@ -97,6 +98,26 @@ static struct lws_protocols protocols[] = {
 	{ NULL, NULL, 0, 0 } /* terminator */
 };
 
+
+/* this shows how to override the lws file operations.  You don't need
+ * to do any of this unless you have a reason (eg, want to serve
+ * compressed files without decompressing the whole archive)
+ */
+static lws_filefd_type
+test_server_fops_open(struct lws *wsi, const char *filename,
+		      unsigned long *filelen, int flags)
+{
+	lws_filefd_type n;
+
+	/* call through to original platform implementation */
+	n = fops_plat.open(wsi, filename, filelen, flags);
+
+	lwsl_notice("%s: opening %s, ret %ld, len %lu\n", __func__, filename,
+			(long)n, *filelen);
+
+	return n;
+}
+
 void sighandler(int sig)
 {
 	force_exit = 1;
@@ -138,7 +159,7 @@ int main(int argc, char **argv)
  	int daemonize = 0;
 #endif
 
-	/* 
+	/*
 	 * take care to zero down the info struct, he contains random garbaage
 	 * from the stack otherwise
 	 */
@@ -198,7 +219,7 @@ int main(int argc, char **argv)
 	}
 
 #if !defined(LWS_NO_DAEMONIZE) && !defined(WIN32)
-	/* 
+	/*
 	 * normally lock path would be /var/lock/lwsts or similar, to
 	 * simplify getting started without having to take care about
 	 * permissions or running as root, set to /tmp/.lwsts-lock
@@ -240,7 +261,7 @@ int main(int argc, char **argv)
 #ifndef LWS_NO_EXTENSIONS
 	info.extensions = lws_get_internal_extensions();
 #endif
-	
+
 	info.ssl_cert_filepath = NULL;
 	info.ssl_private_key_filepath = NULL;
 
@@ -271,6 +292,15 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
+	/* this shows how to override the lws file operations.  You don't need
+	 * to do any of this unless you have a reason (eg, want to serve
+	 * compressed files without decompressing the whole archive)
+	 */
+	/* stash original platform fops */
+	fops_plat = *(lws_get_fops(context));
+	/* override the active fops */
+	lws_get_fops(context)->open = test_server_fops_open;
+
 	n = 0;
 	while (n >= 0 && !force_exit) {
 		struct timeval tv;
@@ -285,7 +315,7 @@ int main(int argc, char **argv)
 
 		ms = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
 		if ((ms - oldms) > 50) {
-			lws_callback_on_writable_all_protocol(
+			lws_callback_on_writable_all_protocol(context,
 				&protocols[PROTOCOL_DUMB_INCREMENT]);
 			oldms = ms;
 		}

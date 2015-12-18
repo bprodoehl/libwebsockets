@@ -37,10 +37,10 @@ int lws_client_rx_sm(struct lws *wsi, unsigned char c)
 			wsi->u.ws.rsv = (c & 0x70);
 			wsi->u.ws.final = !!((c >> 7) & 1);
 			switch (wsi->u.ws.opcode) {
-			case LWS_WS_OPCODE_07__TEXT_FRAME:
-			case LWS_WS_OPCODE_07__BINARY_FRAME:
+			case LWSWSOPC_TEXT_FRAME:
+			case LWSWSOPC_BINARY_FRAME:
 				wsi->u.ws.frame_is_binary = wsi->u.ws.opcode ==
-						 LWS_WS_OPCODE_07__BINARY_FRAME;
+						 LWSWSOPC_BINARY_FRAME;
 				break;
 			}
 			wsi->lws_rx_parse_state = LWS_RXPS_04_FRAME_HDR_LEN;
@@ -176,28 +176,28 @@ int lws_client_rx_sm(struct lws *wsi, unsigned char c)
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_1:
-		wsi->u.ws.frame_masking_nonce_04[0] = c;
+		wsi->u.ws.mask_nonce[0] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_2;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_2:
-		wsi->u.ws.frame_masking_nonce_04[1] = c;
+		wsi->u.ws.mask_nonce[1] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_3;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_3:
-		wsi->u.ws.frame_masking_nonce_04[2] = c;
+		wsi->u.ws.mask_nonce[2] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_4;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_4:
-		wsi->u.ws.frame_masking_nonce_04[3] = c;
+		wsi->u.ws.mask_nonce[3] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 
@@ -223,7 +223,7 @@ int lws_client_rx_sm(struct lws *wsi, unsigned char c)
 		else
 			wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING +
 			       (wsi->u.ws.rx_user_buffer_head++)] =
-			c ^ wsi->u.ws.frame_masking_nonce_04[
+			c ^ wsi->u.ws.mask_nonce[
 					    (wsi->u.ws.frame_mask_index++) & 3];
 
 		if (--wsi->u.ws.rx_packet_length == 0) {
@@ -258,9 +258,9 @@ spill:
 		 */
 
 		switch (wsi->u.ws.opcode) {
-		case LWS_WS_OPCODE_07__CLOSE:
+		case LWSWSOPC_CLOSE:
 			/* is this an acknowledgement of our close? */
-			if (wsi->state == WSI_STATE_AWAITING_CLOSE_ACK) {
+			if (wsi->state == LWSS_AWAITING_CLOSE_ACK) {
 				/*
 				 * fine he has told us he is closing too, let's
 				 * finish our close
@@ -279,11 +279,11 @@ spill:
 			   &wsi->u.ws.rx_user_buffer[
 				LWS_SEND_BUFFER_PRE_PADDING],
 				wsi->u.ws.rx_user_buffer_head, LWS_WRITE_CLOSE);
-			wsi->state = WSI_STATE_RETURNED_CLOSE_ALREADY;
+			wsi->state = LWSS_RETURNED_CLOSE_ALREADY;
 			/* close the connection */
 			return -1;
 
-		case LWS_WS_OPCODE_07__PING:
+		case LWSWSOPC_PING:
 			lwsl_info("received %d byte ping, sending pong\n",
 				  wsi->u.ws.rx_user_buffer_head);
 
@@ -306,7 +306,7 @@ spill:
 			if (wsi->u.ws.ping_payload_buf &&
 			    wsi->u.ws.ping_payload_alloc <
 			    wsi->u.ws.rx_user_buffer_head)
-				lws_free2(wsi->u.ws.ping_payload_buf);
+				lws_free_set_NULL(wsi->u.ws.ping_payload_buf);
 
 			/* if no buffer, allocate it */
 			if (!wsi->u.ws.ping_payload_buf) {
@@ -326,13 +326,13 @@ spill:
 			wsi->u.ws.ping_pending_flag = 1;
 
 			/* get it sent as soon as possible */
-			lws_callback_on_writable(wsi->protocol->owning_server, wsi);
+			lws_callback_on_writable(wsi);
 ping_drop:
 			wsi->u.ws.rx_user_buffer_head = 0;
 			handled = 1;
 			break;
 
-		case LWS_WS_OPCODE_07__PONG:
+		case LWSWSOPC_PONG:
 			lwsl_info("client receied pong\n");
 			lwsl_hexdump(&wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING],
 				     wsi->u.ws.rx_user_buffer_head);
@@ -341,9 +341,9 @@ ping_drop:
 			callback_action = LWS_CALLBACK_CLIENT_RECEIVE_PONG;
 			break;
 
-		case LWS_WS_OPCODE_07__CONTINUATION:
-		case LWS_WS_OPCODE_07__TEXT_FRAME:
-		case LWS_WS_OPCODE_07__BINARY_FRAME:
+		case LWSWSOPC_CONTINUATION:
+		case LWSWSOPC_TEXT_FRAME:
+		case LWSWSOPC_BINARY_FRAME:
 			break;
 
 		default:
@@ -359,8 +359,8 @@ ping_drop:
 			eff_buf.token = &wsi->u.ws.rx_user_buffer[
 						   LWS_SEND_BUFFER_PRE_PADDING];
 			eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
-			
-			if (lws_ext_callback_for_each_active(wsi,
+
+			if (lws_ext_cb_wsi_active_exts(wsi,
 				LWS_EXT_CALLBACK_EXTENDED_PAYLOAD_RX,
 					&eff_buf, 0) <= 0) { /* not handle or fail */
 
@@ -385,8 +385,8 @@ ping_drop:
 		eff_buf.token = &wsi->u.ws.rx_user_buffer[
 						LWS_SEND_BUFFER_PRE_PADDING];
 		eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
-		
-		if (lws_ext_callback_for_each_active(wsi,
+
+		if (lws_ext_cb_wsi_active_exts(wsi,
 						     LWS_EXT_CALLBACK_PAYLOAD_RX,
 						     &eff_buf, 0) < 0) /* fail */
 			return -1;
@@ -403,8 +403,8 @@ ping_drop:
 		if (callback_action == LWS_CALLBACK_CLIENT_RECEIVE_PONG)
 			lwsl_info("Client doing pong callback\n");
 
-		m = wsi->protocol->callback(wsi->protocol->owning_server,
-			wsi, (enum lws_callback_reasons)callback_action,
+		m = wsi->protocol->callback(wsi,
+			(enum lws_callback_reasons)callback_action,
 			wsi->user_space, eff_buf.token, eff_buf.token_len);
 
 		/* if user code wants to close, let caller know */

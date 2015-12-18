@@ -54,7 +54,7 @@ static unsigned int size = 64;
 static int flood;
 static const char *address;
 static unsigned char pingbuf[LWS_SEND_BUFFER_PRE_PADDING + MAX_MIRROR_PAYLOAD +
-						  LWS_SEND_BUFFER_POST_PADDING];
+			     LWS_SEND_BUFFER_POST_PADDING];
 static char peer_name[128];
 static unsigned long started;
 static int screen_width = 80;
@@ -100,29 +100,26 @@ enum demo_protocols {
 
 
 static int
-callback_lws_mirror(struct lws_context * this,
-			struct lws *wsi,
-			enum lws_callback_reasons reason,
-					       void *user, void *in, size_t len)
+callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
+		    void *user, void *in, size_t len)
 {
+	struct per_session_data__ping *psd = user;
 	struct timeval tv;
 	unsigned char *p;
-	int shift;
-	uint64_t l;
 	unsigned long iv;
-	int n;
 	int match = 0;
-	struct per_session_data__ping *psd = user;
+	uint64_t l;
+	int shift;
+	int n;
 
 	switch (reason) {
 	case LWS_CALLBACK_CLOSED:
-
 		fprintf(stderr, "LWS_CALLBACK_CLOSED on %p\n", (void *)wsi);
 
 		/* remove closed guy */
-	
+
 		for (n = 0; n < clients; n++)
-			if (ping_wsi[n] == wsi) {				
+			if (ping_wsi[n] == wsi) {
 				clients--;
 				while (n < clients) {
 					ping_wsi[n] = ping_wsi[n + 1];
@@ -144,7 +141,7 @@ callback_lws_mirror(struct lws_context * this,
 		 * LWS_CALLBACK_CLIENT_WRITEABLE will come next service
 		 */
 
-		lws_callback_on_writable(this, wsi);
+		lws_callback_on_writable(wsi);
 		break;
 
 	case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -293,8 +290,8 @@ static struct lws_protocols protocols[] = {
 		callback_lws_mirror,
 		sizeof (struct per_session_data__ping),
 	},
-	{ 
-		NULL, NULL, 0/* end of list */		
+	{
+		NULL, NULL, 0/* end of list */
 	}
 };
 
@@ -451,8 +448,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	lws_get_peer_addresses(context, ping_wsi[0],
-			lws_get_socket_fd(ping_wsi[0]),
+	lws_get_peer_addresses(ping_wsi[0], lws_get_socket_fd(ping_wsi[0]),
 				    peer_name, sizeof peer_name, ip, sizeof ip);
 
 	fprintf(stderr, "Websocket PING %s (%s) %d bytes of data.\n",
@@ -487,14 +483,13 @@ int main(int argc, char **argv)
 		if (!interrupted_time) {
 			if ((l - oldus) > interval_us) {
 				for (n = 0; n < clients; n++)
-					lws_callback_on_writable(
-							  context, ping_wsi[n]);
+					lws_callback_on_writable(ping_wsi[n]);
 				oldus = l;
 			}
 		} else
 
 			/* allow time for in-flight pongs to come */
-		
+
 			if ((l - interrupted_time) > 250000) {
 				n = -1;
 				continue;

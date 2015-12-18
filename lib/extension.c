@@ -43,14 +43,13 @@ LWS_VISIBLE struct lws_extension *lws_get_internal_extensions()
 
 /* 0 = nobody had nonzero return, 1 = somebody had positive return, -1 = fail */
 
-int lws_ext_callback_for_each_active(struct lws *wsi, int reason,
-				void *arg, int len)
+int lws_ext_cb_wsi_active_exts(struct lws *wsi, int reason, void *arg, int len)
 {
 	int n, m, handled = 0;
 
 	for (n = 0; n < wsi->count_active_extensions; n++) {
 		m = wsi->active_extensions[n]->callback(
-			wsi->protocol->owning_server,
+			lws_get_context(wsi),
 			wsi->active_extensions[n], wsi,
 			reason,
 			wsi->active_extensions_user[n],
@@ -64,20 +63,19 @@ int lws_ext_callback_for_each_active(struct lws *wsi, int reason,
 		if (m > handled)
 			handled = m;
 	}
-	
+
 	return handled;
 }
 
-int lws_ext_callback_for_each_extension_type(
-		struct lws_context *context, struct lws *wsi,
-				int reason, void *arg, int len)
+int lws_ext_cb_all_exts(struct lws_context *context, struct lws *wsi,
+			int reason, void *arg, int len)
 {
 	int n = 0, m, handled = 0;
-	struct lws_extension *ext = context->extensions;
+	const struct lws_extension *ext = context->extensions;
 
 	while (ext && ext->callback && !handled) {
 		m = ext->callback(context, ext, wsi, reason,
-						(void *)(long)n, arg, len);
+				  (void *)(long)n, arg, len);
 		if (m < 0) {
 			lwsl_ext(
 			 "Extension '%s' failed to handle callback %d!\n",
@@ -90,13 +88,12 @@ int lws_ext_callback_for_each_extension_type(
 		ext++;
 		n++;
 	}
-	
+
 	return 0;
 }
 
 int
-lws_issue_raw_ext_access(struct lws *wsi,
-						 unsigned char *buf, size_t len)
+lws_issue_raw_ext_access(struct lws *wsi, unsigned char *buf, size_t len)
 {
 	int ret;
 	struct lws_tokens eff_buf;
@@ -119,7 +116,7 @@ lws_issue_raw_ext_access(struct lws *wsi,
 		ret = 0;
 
 		/* show every extension the new incoming data */
-		m = lws_ext_callback_for_each_active(wsi,
+		m = lws_ext_cb_wsi_active_exts(wsi,
 			       LWS_EXT_CALLBACK_PACKET_TX_PRESEND, &eff_buf, 0);
 		if (m < 0)
 			return -1;
@@ -165,7 +162,7 @@ lws_issue_raw_ext_access(struct lws *wsi,
 		 * Or we had to hold on to some of it?
 		 */
 
-		if (!lws_send_pipe_choked(wsi) && !wsi->truncated_send_len)
+		if (!lws_send_pipe_choked(wsi) && !wsi->trunc_len)
 			/* no we could add more, lets's do that */
 			continue;
 
@@ -175,8 +172,7 @@ lws_issue_raw_ext_access(struct lws *wsi,
 		 * Yes, he's choked.  Don't spill the rest now get a callback
 		 * when he is ready to send and take care of it there
 		 */
-		lws_callback_on_writable(
-					     wsi->protocol->owning_server, wsi);
+		lws_callback_on_writable(wsi);
 		wsi->extension_data_pending = 1;
 		ret = 0;
 	}
@@ -185,13 +181,13 @@ lws_issue_raw_ext_access(struct lws *wsi,
 }
 
 int
-lws_any_extension_handled(struct lws_context *context,
-			  struct lws *wsi,
+lws_any_extension_handled(struct lws *wsi,
 			  enum lws_extension_callback_reasons r,
-						       void *v, size_t len)
+			  void *v, size_t len)
 {
 	int n;
 	int handled = 0;
+	struct lws_context *context = wsi->context;
 
 	/* maybe an extension will take care of it for us */
 

@@ -9,8 +9,9 @@ project(libwebsockets C)
 set(PACKAGE "libwebsockets")
 set(CPACK_PACKAGE_NAME "${PACKAGE}")
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
-set(CPACK_PACKAGE_VERSION_MINOR "5")
-set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "6")
+set(CPACK_PACKAGE_VERSION_PATCH "0")
+set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
 set(CPACK_PACKAGE_VENDOR "andy@warmcat.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PACKAGE} ${PACKAGE_VERSION}")
 set(SOVERSION "6")
@@ -19,6 +20,10 @@ set(CPACK_SOURCE_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSIO
 set(VERSION "${CPACK_PACKAGE_VERSION}")
 
 set(LWS_LIBRARY_VERSION ${CPACK_PACKAGE_VERSION})
+set(LWS_LIBRARY_VERSION_MAJOR ${CPACK_PACKAGE_VERSION_MAJOR})
+set(LWS_LIBRARY_VERSION_MINOR ${CPACK_PACKAGE_VERSION_MINOR})
+set(LWS_LIBRARY_VERSION_PATCH ${CPACK_PACKAGE_VERSION_PATCH})
+
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake/")
 
 message(STATUS "CMAKE_TOOLCHAIN_FILE='${CMAKE_TOOLCHAIN_FILE}'")
@@ -68,7 +73,6 @@ option(LWS_WITHOUT_DAEMONIZE "Don't build the daemonization api" ON)
 option(LWS_IPV6 "Compile with support for ipv6" OFF)
 option(LWS_WITH_HTTP2 "Compile with support for http2" OFF)
 option(LWS_MBED3 "Platform is MBED3" OFF)
-option(LWS_WITH_OLD_API_WRAPPERS "Compile with binary compatibility with pre-v1.6 apis" OFF)
 
 if (DEFINED YOTTA_WEBSOCKETS_VERSION_STRING)
 
@@ -957,7 +961,7 @@ includedir=\${prefix}/include
 
 Name: libwebsockets
 Description: Websockets server and client library
-Version: ${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}
+Version: ${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}
 
 Libs: -L\${libdir} -lwebsockets
 Cflags: -I\${includedir}"
@@ -1095,7 +1099,6 @@ message(" LWS_USE_LIBEV = ${LWS_USE_LIBEV}")
 message(" LWS_IPV6 = ${LWS_IPV6}")
 message(" LWS_WITH_HTTP2 = ${LWS_WITH_HTTP2}")
 message(" LWS_MBED3 = ${LWS_MBED3}")
-message(" LWS_WITH_OLD_API_WRAPPERS = ${LWS_WITH_OLD_API_WRAPPERS}")
 message("---------------------------------------------------------------------")
 
 # These will be available to parent projects including libwebsockets using add_subdirectory()
