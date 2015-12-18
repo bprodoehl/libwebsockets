@@ -24,13 +24,13 @@
 #define LWS_CPYAPP(ptr, str) { strcpy(ptr, str); ptr += strlen(str); }
 #ifndef LWS_NO_EXTENSIONS
 LWS_VISIBLE int
-lws_extension_server_handshake(struct lws_context *context,
-			       struct lws *wsi, char **p)
+lws_extension_server_handshake(struct lws *wsi, char **p)
 {
 	int n;
 	char *c;
 	char ext_name[128];
-	struct lws_extension *ext;
+	const struct lws_extension *ext;
+	struct lws_context *context = wsi->context;
 	int ext_count = 0;
 	int more = 1;
 
@@ -47,12 +47,12 @@ lws_extension_server_handshake(struct lws_context *context,
 	 * and go through them
 	 */
 
-	if (lws_hdr_copy(wsi, (char *)context->service_buffer,
-			sizeof(context->service_buffer),
+	if (lws_hdr_copy(wsi, (char *)context->serv_buf,
+			sizeof(context->serv_buf),
 					      WSI_TOKEN_EXTENSIONS) < 0)
 		return 1;
 
-	c = (char *)context->service_buffer;
+	c = (char *)context->serv_buf;
 	lwsl_parser("WSI_TOKEN_EXTENSIONS = '%s'\n", c);
 	wsi->count_active_extensions = 0;
 	n = 0;
@@ -75,7 +75,7 @@ lws_extension_server_handshake(struct lws_context *context,
 
 		/* check a client's extension against our support */
 
-		ext = wsi->protocol->owning_server->extensions;
+		ext = lws_get_context(wsi)->extensions;
 
 		while (ext && ext->callback) {
 
@@ -85,23 +85,18 @@ lws_extension_server_handshake(struct lws_context *context,
 			}
 
 			/*
-			 * oh, we do support this one he
-			 * asked for... but let's ask user
-			 * code if it's OK to apply it on this
+			 * oh, we do support this one he asked for... but let's
+			 * ask user code if it's OK to apply it on this
 			 * particular connection + protocol
 			 */
 
-			n = wsi->protocol->owning_server->
-				protocols[0].callback(
-					wsi->protocol->owning_server,
-					wsi,
-				  LWS_CALLBACK_CONFIRM_EXTENSION_OKAY,
-					  wsi->user_space, ext_name, 0);
+			n = lws_get_context(wsi)->protocols[0].callback(wsi,
+				LWS_CALLBACK_CONFIRM_EXTENSION_OKAY,
+				wsi->user_space, ext_name, 0);
 
 			/*
-			 * zero return from callback means
-			 * go ahead and allow the extension,
-			 * it's what we get if the callback is
+			 * zero return from callback means go ahead and allow
+			 * the extension, it's what we get if the callback is
 			 * unhandled
 			 */
 
@@ -136,7 +131,7 @@ lws_extension_server_handshake(struct lws_context *context,
 
 			/* allow him to construct his context */
 
-			ext->callback(wsi->protocol->owning_server,
+			ext->callback(lws_get_context(wsi),
 					ext, wsi,
 					LWS_EXT_CALLBACK_CONSTRUCT,
 					wsi->active_extensions_user[
@@ -181,15 +176,15 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 	 * since key length is restricted above (currently 128), cannot
 	 * overflow
 	 */
-	n = sprintf((char *)context->service_buffer,
+	n = sprintf((char *)context->serv_buf,
 				"%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
 				lws_hdr_simple_ptr(wsi, WSI_TOKEN_KEY));
 
-	lws_SHA1(context->service_buffer, n, hash);
+	lws_SHA1(context->serv_buf, n, hash);
 
 	accept_len = lws_b64_encode_string((char *)hash, 20,
-			(char *)context->service_buffer,
-			sizeof(context->service_buffer));
+			(char *)context->serv_buf,
+			sizeof(context->serv_buf));
 	if (accept_len < 0) {
 		lwsl_warn("Base64 encoded hash too long\n");
 		goto bail;
@@ -203,13 +198,13 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 
 	/* make a buffer big enough for everything */
 
-	response = (char *)context->service_buffer + MAX_WEBSOCKET_04_KEY_LEN + LWS_SEND_BUFFER_PRE_PADDING;
+	response = (char *)context->serv_buf + MAX_WEBSOCKET_04_KEY_LEN + LWS_SEND_BUFFER_PRE_PADDING;
 	p = response;
 	LWS_CPYAPP(p, "HTTP/1.1 101 Switching Protocols\x0d\x0a"
 		      "Upgrade: WebSocket\x0d\x0a"
 		      "Connection: Upgrade\x0d\x0a"
 		      "Sec-WebSocket-Accept: ");
-	strcpy(p, (char *)context->service_buffer);
+	strcpy(p, (char *)context->serv_buf);
 	p += accept_len;
 
 	if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL)) {
@@ -225,7 +220,7 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 	 * Figure out which extensions the client has that we want to
 	 * enable on this connection, and give him back the list
 	 */
-	if (lws_extension_server_handshake(context, wsi, &p))
+	if (lws_extension_server_handshake(wsi, &p))
 		goto bail;
 #endif
 
@@ -234,10 +229,9 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 	/* end of response packet */
 
 	LWS_CPYAPP(p, "\x0d\x0a\x0d\x0a");
-	
-	if (!lws_any_extension_handled(context, wsi,
-			LWS_EXT_CALLBACK_HANDSHAKE_REPLY_TX,
-						     response, p - response)) {
+
+	if (!lws_any_extension_handled(wsi, LWS_EXT_CALLBACK_HANDSHAKE_REPLY_TX,
+				       response, p - response)) {
 
 		/* okay send the handshake response accepting the connection */
 
@@ -246,7 +240,7 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 		fwrite(response, 1,  p - response, stderr);
 #endif
 		n = lws_write(wsi, (unsigned char *)response,
-						  p - response, LWS_WRITE_HTTP_HEADERS);
+			      p - response, LWS_WRITE_HTTP_HEADERS);
 		if (n != (p - response)) {
 			lwsl_debug("handshake_0405: ERROR writing to socket\n");
 			goto bail;
@@ -256,21 +250,21 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 
 	/* alright clean up and set ourselves into established state */
 
-	wsi->state = WSI_STATE_ESTABLISHED;
+	wsi->state = LWSS_ESTABLISHED;
 	wsi->lws_rx_parse_state = LWS_RXPS_NEW;
 
 	/* notify user code that we're ready to roll */
 
 	if (wsi->protocol->callback)
-		wsi->protocol->callback(wsi->protocol->owning_server,
-				wsi, LWS_CALLBACK_ESTABLISHED,
-					  wsi->user_space,
+		if (wsi->protocol->callback(wsi, LWS_CALLBACK_ESTABLISHED,
+					    wsi->user_space,
 #ifdef LWS_OPENSSL_SUPPORT
-					  wsi->ssl,
+					    wsi->ssl,
 #else
-					  NULL,
+					    NULL,
 #endif
-					  0);
+					    0))
+			goto bail;
 
 	return 0;
 

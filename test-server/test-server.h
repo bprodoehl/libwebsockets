@@ -1,3 +1,9 @@
+#if defined(_WIN32) && defined(EXTERNAL_POLL)
+#define WINVER 0x0600
+#define _WIN32_WINNT 0x0600
+#define poll(fdArray, fds, timeout)  WSAPoll((LPWSAPOLLFD)(fdArray), (ULONG)(fds), (INT)(timeout))
+#endif
+
 #include "lws_config.h"
 
 #include <stdio.h>
@@ -13,9 +19,6 @@
 
 #ifdef _WIN32
 #include <io.h>
-#ifdef EXTERNAL_POLL
-#define poll WSAPoll
-#endif
 #include "gettimeofday.h"
 #else
 #include <syslog.h>
@@ -43,7 +46,7 @@ extern void test_server_unlock(int care);
 #endif
 
 struct per_session_data__http {
-	int fd;
+	lws_filefd_type fd;
 };
 
 /*
@@ -63,18 +66,15 @@ struct per_session_data__lws_mirror {
 	int ringbuffer_tail;
 };
 
-extern int callback_http(struct lws_context *context,
-			 struct lws *wsi,
-			 enum lws_callback_reasons reason,
-			 void *user, void *in, size_t len);
-extern int callback_lws_mirror(struct lws_context *context,
-			       struct lws *wsi,
-			       enum lws_callback_reasons reason,
-			       void *user, void *in, size_t len);
-extern int callback_dumb_increment(struct lws_context *context,
-			       struct lws *wsi,
-			       enum lws_callback_reasons reason,
-			       void *user, void *in, size_t len);
+extern int
+callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
+	      void *in, size_t len);
+extern int
+callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
+		    void *user, void *in, size_t len);
+extern int
+callback_dumb_increment(struct lws *wsi, enum lws_callback_reasons reason,
+			void *user, void *in, size_t len);
 
 extern void
 dump_handshake_info(struct lws *wsi);

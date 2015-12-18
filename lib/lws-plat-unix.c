@@ -14,18 +14,19 @@ unsigned long long time_in_microseconds(void)
 	return ((unsigned long long)tv.tv_sec * 1000000LL) + tv.tv_usec;
 }
 
-LWS_VISIBLE int lws_get_random(struct lws_context *context,
-							     void *buf, int len)
+LWS_VISIBLE int
+lws_get_random(struct lws_context *context, void *buf, int len)
 {
 	return read(context->fd_random, (char *)buf, len);
 }
 
-LWS_VISIBLE int lws_send_pipe_choked(struct lws *wsi)
+LWS_VISIBLE int
+lws_send_pipe_choked(struct lws *wsi)
 {
 	struct lws_pollfd fds;
 
 	/* treat the fact we got a truncated send pending as if we're choked */
-	if (wsi->truncated_send_len)
+	if (wsi->trunc_len)
 		return 1;
 
 	fds.fd = wsi->sock;
@@ -111,7 +112,7 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 
 	lws_libev_run(context);
 
-	context->service_tid = context->protocols[0].callback(context, NULL,
+	context->service_tid = context->protocols[0].callback(NULL,
 				     LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
 
 #ifdef LWS_OPENSSL_SUPPORT
@@ -148,17 +149,17 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 	wsi = context->pending_read_list;
 	while (wsi) {
 		wsi_next = wsi->pending_read_list_next;
-       context->fds[wsi->position_in_fds_table].revents |=
-               context->fds[wsi->position_in_fds_table].events & POLLIN;
-       if (context->fds[wsi->position_in_fds_table].revents & POLLIN) {
+		context->fds[wsi->position_in_fds_table].revents |=
+			context->fds[wsi->position_in_fds_table].events & POLLIN;
+		if (context->fds[wsi->position_in_fds_table].revents & POLLIN)
 			/*
 			 * he's going to get serviced now, take him off the
 			 * list of guys with buffered SSL.  If he still has some
 			 * at the end of the service, he'll get put back on the
 			 * list then.
 			 */
-			lws_ssl_remove_wsi_from_buffered_list(context, wsi);
-		}
+			lws_ssl_remove_wsi_from_buffered_list(wsi);
+
 		wsi = wsi_next;
 	}
 #endif
@@ -166,7 +167,6 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 	/* any socket with events to service? */
 
 	for (n = 0; n < context->fds_count; n++) {
-
 		if (!context->fds[n].revents)
 			continue;
 
@@ -202,7 +202,7 @@ lws_plat_set_socket_options(struct lws_context *context, int fd)
 		/* enable keepalive on this socket */
 		optval = 1;
 		if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE,
-					     (const void *)&optval, optlen) < 0)
+			       (const void *)&optval, optlen) < 0)
 			return 1;
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
@@ -216,17 +216,17 @@ lws_plat_set_socket_options(struct lws_context *context, int fd)
 		/* set the keepalive conditions we want on it too */
 		optval = context->ka_time;
 		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,
-					     (const void *)&optval, optlen) < 0)
+			       (const void *)&optval, optlen) < 0)
 			return 1;
 
 		optval = context->ka_interval;
 		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL,
-					     (const void *)&optval, optlen) < 0)
+			       (const void *)&optval, optlen) < 0)
 			return 1;
 
 		optval = context->ka_probes;
 		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,
-					     (const void *)&optval, optlen) < 0)
+			       (const void *)&optval, optlen) < 0)
 			return 1;
 #endif
 	}
@@ -271,52 +271,9 @@ lws_plat_drop_app_privileges(struct lws_context_creation_info *info)
 
 }
 
-LWS_VISIBLE int
-lws_plat_init_lookup(struct lws_context *context)
-{
-	context->lws_lookup = lws_zalloc(sizeof(struct lws *) * context->max_fds);
-	if (context->lws_lookup == NULL) {
-		lwsl_err(
-		  "Unable to allocate lws_lookup array for %d connections\n",
-							      context->max_fds);
-		return 1;
-	}
-
-	return 0;
-}
-
-LWS_VISIBLE int
-lws_plat_init_fd_tables(struct lws_context *context)
-{
-	context->fd_random = open(SYSTEM_RANDOM_FILEPATH, O_RDONLY);
-	if (context->fd_random < 0) {
-		lwsl_err("Unable to open random device %s %d\n",
-				    SYSTEM_RANDOM_FILEPATH, context->fd_random);
-		return 1;
-	}
-
-	if (lws_libev_init_fd_table(context))
-		/* libev handled it instead */
-		return 0;
-
-	if (pipe(context->dummy_pipe_fds)) {
-		lwsl_err("Unable to create pipe\n");
-		return 1;
-	}
-
-	/* use the read end of pipe as first item */
-	context->fds[0].fd = context->dummy_pipe_fds[0];
-	context->fds[0].events = LWS_POLLIN;
-	context->fds[0].revents = 0;
-	context->fds_count = 1;
-
-	return 0;
-}
-
 static void sigpipe_handler(int x)
 {
 }
-
 
 LWS_VISIBLE int
 lws_plat_context_early_init(void)
@@ -425,7 +382,7 @@ LWS_VISIBLE void
 lws_plat_insert_socket_into_fds(struct lws_context *context,
 						       struct lws *wsi)
 {
-	lws_libev_io(context, wsi, LWS_EV_START | LWS_EV_READ);
+	lws_libev_io(wsi, LWS_EV_START | LWS_EV_READ);
 	context->fds[context->fds_count++].revents = 0;
 }
 
@@ -440,7 +397,7 @@ lws_plat_service_periodic(struct lws_context *context)
 {
 	/* if our parent went down, don't linger around */
 	if (context->started_with_parent &&
-			      kill(context->started_with_parent, 0) < 0)
+	    kill(context->started_with_parent, 0) < 0)
 		kill(getpid(), SIGTERM);
 }
 
@@ -451,11 +408,18 @@ lws_plat_change_pollfd(struct lws_context *context,
 	return 0;
 }
 
-LWS_VISIBLE int
-lws_plat_open_file(const char* filename, unsigned long* filelen)
+LWS_VISIBLE const char *
+lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
+{
+	return inet_ntop(af, src, dst, cnt);
+}
+
+static lws_filefd_type
+_lws_plat_file_open(struct lws *wsi, const char *filename,
+		    unsigned long *filelen, int flags)
 {
 	struct stat stat_buf;
-	int ret = open(filename, O_RDONLY);
+	int ret = open(filename, flags, 0664);
 
 	if (ret < 0)
 		return LWS_INVALID_FILE;
@@ -468,8 +432,91 @@ lws_plat_open_file(const char* filename, unsigned long* filelen)
 	return ret;
 }
 
-LWS_VISIBLE const char *
-lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
+static int
+_lws_plat_file_close(struct lws *wsi, lws_filefd_type fd)
 {
-	return inet_ntop(af, src, dst, cnt);
+	return close(fd);
+}
+
+unsigned long
+_lws_plat_file_seek_cur(struct lws *wsi, lws_filefd_type fd, long offset)
+{
+	return lseek(fd, offset, SEEK_CUR);
+}
+
+static int
+_lws_plat_file_read(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		    unsigned char *buf, unsigned long len)
+{
+	long n;
+
+	n = read((int)fd, buf, len);
+	if (n == -1) {
+		*amount = 0;
+		return -1;
+	}
+
+	*amount = n;
+
+	return 0;
+}
+
+static int
+_lws_plat_file_write(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		     unsigned char *buf, unsigned long len)
+{
+	long n;
+
+	n = write((int)fd, buf, len);
+	if (n == -1) {
+		*amount = 0;
+		return -1;
+	}
+
+	*amount = n;
+
+	return 0;
+}
+
+LWS_VISIBLE int
+lws_plat_init(struct lws_context *context,
+	      struct lws_context_creation_info *info)
+{
+	context->lws_lookup = lws_zalloc(sizeof(struct lws *) * context->max_fds);
+	if (context->lws_lookup == NULL) {
+		lwsl_err(
+		  "Unable to allocate lws_lookup array for %d connections\n",
+							      context->max_fds);
+		return 1;
+	}
+
+	context->fd_random = open(SYSTEM_RANDOM_FILEPATH, O_RDONLY);
+	if (context->fd_random < 0) {
+		lwsl_err("Unable to open random device %s %d\n",
+				    SYSTEM_RANDOM_FILEPATH, context->fd_random);
+		return 1;
+	}
+
+	if (lws_libev_init_fd_table(context))
+		/* libev handled it instead */
+		return 0;
+
+	if (pipe(context->dummy_pipe_fds)) {
+		lwsl_err("Unable to create pipe\n");
+		return 1;
+	}
+
+	/* use the read end of pipe as first item */
+	context->fds[0].fd = context->dummy_pipe_fds[0];
+	context->fds[0].events = LWS_POLLIN;
+	context->fds[0].revents = 0;
+	context->fds_count = 1;
+
+	context->fops.open	= _lws_plat_file_open;
+	context->fops.close	= _lws_plat_file_close;
+	context->fops.seek_cur	= _lws_plat_file_seek_cur;
+	context->fops.read	= _lws_plat_file_read;
+	context->fops.write	= _lws_plat_file_write;
+
+	return 0;
 }

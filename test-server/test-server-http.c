@@ -52,7 +52,7 @@ enum demo_protocols {
 struct serveable {
 	const char *urlpath;
 	const char *mimetype;
-}; 
+};
 
 /*
  * this is just an example of parsing handshake headers, you don't need this
@@ -105,19 +105,18 @@ const char * get_mimetype(const char *file)
 }
 
 /* this protocol server (always the first one) handles HTTP,
- * 
+ *
  * Some misc callbacks that aren't associated with a protocol also turn up only
  * here on the first protocol server.
  */
 
-int callback_http(struct lws_context *context, struct lws *wsi,
-		  enum lws_callback_reasons reason, void *user,
+int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		  void *in, size_t len)
 {
 	struct per_session_data__http *pss =
 			(struct per_session_data__http *)user;
 	static unsigned char buffer[4096];
-	struct stat stat_buf;
+	unsigned long amount, file_len;
 	char leaf_path[1024];
 	const char *mimetype;
 	char *other_headers;
@@ -137,16 +136,23 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 
 		dump_handshake_info(wsi);
 
+		/* dump the individual URI Arg parameters */
+		n = 0;
+		while (lws_hdr_copy_fragment(wsi, buf, sizeof(buf),
+					     WSI_TOKEN_HTTP_URI_ARGS, n) > 0) {
+			lwsl_info("URI Arg %d: %s\n", ++n, buf);
+		}
+
 		if (len < 1) {
-			lws_return_http_status(context, wsi,
+			lws_return_http_status(wsi,
 						HTTP_STATUS_BAD_REQUEST, NULL);
 			goto try_to_reuse;
 		}
 
 		/* this example server has no concept of directories */
 		if (strchr((const char *)in + 1, '/')) {
-			lws_return_http_status(context, wsi,
-						HTTP_STATUS_FORBIDDEN, NULL);
+			lws_return_http_status(wsi,
+					       HTTP_STATUS_FORBIDDEN, NULL);
 			goto try_to_reuse;
 		}
 
@@ -165,44 +171,39 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 
 			p = buffer + LWS_SEND_BUFFER_PRE_PADDING;
 			end = p + sizeof(buffer) - LWS_SEND_BUFFER_PRE_PADDING;
-#ifdef _WIN32
-			pss->fd = open(leaf_path, O_RDONLY | _O_BINARY);
-#else
-			pss->fd = open(leaf_path, O_RDONLY);
-#endif
 
-			if (pss->fd < 0)
-				return -1;
+			pss->fd = lws_plat_file_open(wsi, leaf_path, &file_len,
+						     LWS_O_RDONLY);
 
-			if (fstat(pss->fd, &stat_buf) < 0)
+			if (pss->fd == LWS_INVALID_FILE)
 				return -1;
 
 			/*
 			 * we will send a big jpeg file, but it could be
 			 * anything.  Set the Content-Type: appropriately
 			 * so the browser knows what to do with it.
-			 * 
+			 *
 			 * Notice we use the APIs to build the header, which
 			 * will do the right thing for HTTP 1/1.1 and HTTP2
 			 * depending on what connection it happens to be working
 			 * on
 			 */
-			if (lws_add_http_header_status(context, wsi, 200, &p, end))
+			if (lws_add_http_header_status(wsi, 200, &p, end))
 				return 1;
-			if (lws_add_http_header_by_token(context, wsi,
-					WSI_TOKEN_HTTP_SERVER,
+			if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_SERVER,
 				    	(unsigned char *)"libwebsockets",
 					13, &p, end))
 				return 1;
-			if (lws_add_http_header_by_token(context, wsi,
+			if (lws_add_http_header_by_token(wsi,
 					WSI_TOKEN_HTTP_CONTENT_TYPE,
 				    	(unsigned char *)"image/jpeg",
 					10, &p, end))
 				return 1;
-			if (lws_add_http_header_content_length(context, wsi,
-						stat_buf.st_size, &p, end))
+			if (lws_add_http_header_content_length(wsi,
+							       file_len, &p,
+							       end))
 				return 1;
-			if (lws_finalize_http_header(context, wsi, &p, end))
+			if (lws_finalize_http_header(wsi, &p, end))
 				return 1;
 
 			/*
@@ -210,25 +211,24 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 			 * this won't block since it's the first payload sent
 			 * on the connection since it was established
 			 * (too small for partial)
-			 * 
+			 *
 			 * Notice they are sent using LWS_WRITE_HTTP_HEADERS
 			 * which also means you can't send body too in one step,
 			 * this is mandated by changes in HTTP2
 			 */
 
-			n = lws_write(wsi,
-					buffer + LWS_SEND_BUFFER_PRE_PADDING,
-					p - (buffer + LWS_SEND_BUFFER_PRE_PADDING),
-					LWS_WRITE_HTTP_HEADERS);
+			n = lws_write(wsi, buffer + LWS_SEND_BUFFER_PRE_PADDING,
+				      p - (buffer + LWS_SEND_BUFFER_PRE_PADDING),
+				      LWS_WRITE_HTTP_HEADERS);
 
 			if (n < 0) {
-				close(pss->fd);
+				lws_plat_file_close(wsi, pss->fd);
 				return -1;
 			}
 			/*
 			 * book us a LWS_CALLBACK_HTTP_WRITEABLE callback
 			 */
-			lws_callback_on_writable(context, wsi);
+			lws_callback_on_writable(wsi);
 			break;
 		}
 
@@ -246,12 +246,12 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 		mimetype = get_mimetype(buf);
 		if (!mimetype) {
 			lwsl_err("Unknown mimetype for %s\n", buf);
-			lws_return_http_status(context, wsi,
+			lws_return_http_status(wsi,
 				      HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE, NULL);
 			return -1;
 		}
 
-		/* demostrates how to set a cookie on / */
+		/* demonstrates how to set a cookie on / */
 
 		other_headers = NULL;
 		n = 0;
@@ -265,8 +265,8 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 
 			p = (unsigned char *)leaf_path;
 
-			if (lws_add_http_header_by_name(context, wsi, 
-				(unsigned char *)"set-cookie:", 
+			if (lws_add_http_header_by_name(wsi,
+				(unsigned char *)"set-cookie:",
 				(unsigned char *)b64, n, &p,
 				(unsigned char *)leaf_path + sizeof(leaf_path)))
 				return 1;
@@ -274,8 +274,7 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 			other_headers = leaf_path;
 		}
 
-		n = lws_serve_http_file(context, wsi, buf,
-						mimetype, other_headers, n);
+		n = lws_serve_http_file(wsi, buf, mimetype, other_headers, n);
 		if (n < 0 || ((n > 0) && lws_http_transaction_completed(wsi)))
 			return -1; /* error or can't reuse connection: close the socket */
 
@@ -301,8 +300,7 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 	case LWS_CALLBACK_HTTP_BODY_COMPLETION:
 		lwsl_notice("LWS_CALLBACK_HTTP_BODY_COMPLETION\n");
 		/* the whole of the sent body arrived, close or reuse the connection */
-		lws_return_http_status(context, wsi,
-						HTTP_STATUS_OK, NULL);
+		lws_return_http_status(wsi, HTTP_STATUS_OK, NULL);
 		goto try_to_reuse;
 
 	case LWS_CALLBACK_HTTP_FILE_COMPLETION:
@@ -315,7 +313,7 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 		do {
 			/* we'd like the send this much */
 			n = sizeof(buffer) - LWS_SEND_BUFFER_PRE_PADDING;
-			
+
 			/* but if the peer told us he wants less, we can adapt */
 			m = lws_get_peer_write_allowance(wsi);
 
@@ -327,18 +325,20 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 			if (m != -1 && m < n)
 				/* he couldn't handle that much */
 				n = m;
-			
-			n = read(pss->fd, buffer + LWS_SEND_BUFFER_PRE_PADDING,
-				 n);
+
+			n = lws_plat_file_read(wsi, pss->fd,
+					       &amount, buffer +
+					        LWS_SEND_BUFFER_PRE_PADDING, n);
 			/* problem reading, close conn */
 			if (n < 0)
 				goto bail;
+			n = (int)amount;
 			/* sent it all, close conn */
 			if (n == 0)
 				goto flush_bail;
 			/*
 			 * To support HTTP2, must take care about preamble space
-			 * 
+			 *
 			 * identification of when we send the last payload frame
 			 * is handled by the library itself if you sent a
 			 * content-length header
@@ -354,13 +354,14 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 			 */
 			if (m != n)
 				/* partial write, adjust */
-				if (lseek(pss->fd, m - n, SEEK_CUR) < 0)
+				if (lws_plat_file_seek_cur(wsi, pss->fd, m - n) ==
+							     (unsigned long)-1)
 					goto bail;
 
 			if (m) /* while still active, extend timeout */
 				lws_set_timeout(wsi,
 						PENDING_TIMEOUT_HTTP_CONTENT, 5);
-			
+
 			/* if we have indigestion, let him clear it
 			 * before eating more */
 			if (lws_partial_buffered(wsi))
@@ -369,19 +370,19 @@ int callback_http(struct lws_context *context, struct lws *wsi,
 		} while (!lws_send_pipe_choked(wsi));
 
 later:
-		lws_callback_on_writable(context, wsi);
+		lws_callback_on_writable(wsi);
 		break;
 flush_bail:
 		/* true if still partial pending */
 		if (lws_partial_buffered(wsi)) {
-			lws_callback_on_writable(context, wsi);
+			lws_callback_on_writable(wsi);
 			break;
 		}
-		close(pss->fd);
+		lws_plat_file_close(wsi, pss->fd);
 		goto try_to_reuse;
 
 bail:
-		close(pss->fd);
+		lws_plat_file_close(wsi, pss->fd);
 		return -1;
 
 	/*

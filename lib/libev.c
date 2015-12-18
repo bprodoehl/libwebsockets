@@ -29,11 +29,12 @@ void lws_feature_status_libev(struct lws_context_creation_info *info)
 		lwsl_notice("libev support compiled in but disabled\n");
 }
 
-static void 
+static void
 lws_accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	struct lws_pollfd eventfd;
-	struct lws_io_watcher *lws_io = container_of(watcher, struct lws_io_watcher, watcher);
+	struct lws_io_watcher *lws_io = container_of(watcher,
+						struct lws_io_watcher, watcher);
 	struct lws_context *context = lws_io->context;
 
 	if (revents & EV_ERROR)
@@ -51,8 +52,7 @@ lws_accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 }
 
 LWS_VISIBLE void
-lws_sigint_cb(struct ev_loop *loop,
-		       struct ev_signal *watcher, int revents)
+lws_sigint_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 {
 	ev_break(loop, EVBREAK_ALL);
 }
@@ -87,13 +87,13 @@ lws_initloop(
 		loop = ev_default_loop(0);
 
 	context->io_loop = loop;
-   
+
 	/*
 	 * Initialize the accept w_accept with the listening socket
 	 * and register a callback for read operations:
 	 */
 	ev_io_init(w_accept, lws_accept_cb,
-					context->listen_service_fd, EV_READ);
+					context->lserv_fd, EV_READ);
 	ev_io_start(context->io_loop,w_accept);
 
 	/* Register the signal watcher unless the user has indicated otherwise: */
@@ -133,25 +133,26 @@ lws_initloop(
 }
 
 LWS_VISIBLE void
-lws_libev_accept(struct lws_context *context,
-				 struct lws *new_wsi, int accept_fd)
+lws_libev_accept(struct lws *new_wsi, int accept_fd)
 {
+	struct lws_context *context = lws_get_context(new_wsi);
 	struct ev_io *r = &new_wsi->w_read.watcher;
 	struct ev_io *w = &new_wsi->w_write.watcher;
 
 	if (!LWS_LIBEV_ENABLED(context))
 		return;
 
-        new_wsi->w_read.context = context;
-        new_wsi->w_write.context = context;
-        ev_io_init(r, lws_accept_cb, accept_fd, EV_READ);
-        ev_io_init(w, lws_accept_cb, accept_fd, EV_WRITE);
+	new_wsi->w_read.context = context;
+	new_wsi->w_write.context = context;
+	ev_io_init(r, lws_accept_cb, accept_fd, EV_READ);
+	ev_io_init(w, lws_accept_cb, accept_fd, EV_WRITE);
 }
 
 LWS_VISIBLE void
-lws_libev_io(struct lws_context *context,
-					 struct lws *wsi, int flags)
+lws_libev_io(struct lws *wsi, int flags)
 {
+	struct lws_context *context = lws_get_context(wsi);
+
 	if (!LWS_LIBEV_ENABLED(context))
 		return;
 
@@ -187,7 +188,7 @@ lws_libev_init_fd_table(struct lws_context *context)
 }
 
 LWS_VISIBLE void
-lws_libev_run(struct lws_context *context)
+lws_libev_run(const struct lws_context *context)
 {
 	if (context->io_loop && LWS_LIBEV_ENABLED(context))
 		ev_run(context->io_loop, 0);

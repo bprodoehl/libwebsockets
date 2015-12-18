@@ -36,7 +36,7 @@ time_t time(time_t *t)
 /* file descriptor hash management */
 
 struct lws *
-wsi_from_fd(struct lws_context *context, lws_sockfd_type fd)
+wsi_from_fd(const struct lws_context *context, lws_sockfd_type fd)
 {
 	int h = LWS_FD_HASH(fd);
 	int n = 0;
@@ -149,12 +149,12 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 	if (context == NULL)
 		return 1;
 
-	context->service_tid = context->protocols[0].callback(context, NULL,
+	context->service_tid = context->protocols[0].callback(NULL,
 				     LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
 
 	for (i = 0; i < context->fds_count; ++i) {
 		pfd = &context->fds[i];
-		if (pfd->fd == context->listen_service_fd)
+		if (pfd->fd == context->lserv_fd)
 			continue;
 
 		if (pfd->events & LWS_POLLOUT) {
@@ -218,7 +218,7 @@ lws_plat_set_socket_options(struct lws_context *context, lws_sockfd_type fd)
 	DWORD dwBytesRet;
 	struct tcp_keepalive alive;
 	struct protoent *tcp_proto;
-			
+
 	if (context->ka_time) {
 		/* enable keepalive on this socket */
 		optval = 1;
@@ -230,7 +230,7 @@ lws_plat_set_socket_options(struct lws_context *context, lws_sockfd_type fd)
 		alive.keepalivetime = context->ka_time;
 		alive.keepaliveinterval = context->ka_interval;
 
-		if (WSAIoctl(fd, SIO_KEEPALIVE_VALS, &alive, sizeof(alive), 
+		if (WSAIoctl(fd, SIO_KEEPALIVE_VALS, &alive, sizeof(alive),
 					      NULL, 0, &dwBytesRet, NULL, NULL))
 			return 1;
 	}
@@ -254,40 +254,6 @@ lws_plat_set_socket_options(struct lws_context *context, lws_sockfd_type fd)
 LWS_VISIBLE void
 lws_plat_drop_app_privileges(struct lws_context_creation_info *info)
 {
-}
-
-LWS_VISIBLE int
-lws_plat_init_lookup(struct lws_context *context)
-{
-	int i;
-
-	for (i = 0; i < FD_HASHTABLE_MODULUS; i++) {
-		context->fd_hashtable[i].wsi = lws_zalloc(sizeof(struct lws*) * context->max_fds);
-
-		if (!context->fd_hashtable[i].wsi) {
-			return -1;
-		}
-	}
-
-	return 0;
-}
-
-LWS_VISIBLE int
-lws_plat_init_fd_tables(struct lws_context *context)
-{
-	context->events = lws_malloc(sizeof(WSAEVENT) * (context->max_fds + 1));
-	if (context->events == NULL) {
-		lwsl_err("Unable to allocate events array for %d connections\n",
-			context->max_fds);
-		return 1;
-	}
-
-	context->fds_count = 0;
-	context->events[0] = WSACreateEvent();
-
-	context->fd_random = 0;
-
-	return 0;
 }
 
 LWS_VISIBLE int
@@ -381,10 +347,10 @@ lws_plat_change_pollfd(struct lws_context *context,
 		      struct lws *wsi, struct lws_pollfd *pfd)
 {
 	long networkevents = LWS_POLLHUP;
-		
+
 	if ((pfd->events & LWS_POLLIN))
 		networkevents |= LWS_POLLIN;
-	
+
 	if ((pfd->events & LWS_POLLOUT))
 		networkevents |= LWS_POLLOUT;
 
@@ -398,26 +364,9 @@ lws_plat_change_pollfd(struct lws_context *context,
 	return 1;
 }
 
-LWS_VISIBLE HANDLE
-lws_plat_open_file(const char* filename, unsigned long* filelen)
-{
-	HANDLE ret;
-	WCHAR buffer[MAX_PATH];
-
-	MultiByteToWideChar(CP_UTF8, 0, filename, -1, buffer,
-				sizeof(buffer) / sizeof(buffer[0]));
-	ret = CreateFileW(buffer, GENERIC_READ, FILE_SHARE_READ,
-				NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-
-	if (ret != LWS_INVALID_FILE)
-		*filelen = GetFileSize(ret, NULL);
-
-	return ret;
-}
-
 LWS_VISIBLE const char *
 lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
-{ 
+{
 	WCHAR *buffer;
 	DWORD bufferlen = cnt;
 	BOOL ok = FALSE;
@@ -459,4 +408,114 @@ lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
 
 	lws_free(buffer);
 	return ok ? dst : NULL;
+}
+
+static lws_filefd_type
+_lws_plat_file_open(struct lws *wsi, const char *filename,
+		    unsigned long *filelen, int flags)
+{
+	HANDLE ret;
+	WCHAR buf[MAX_PATH];
+
+	(void)wsi;
+	MultiByteToWideChar(CP_UTF8, 0, filename, -1, buf, ARRAY_SIZE(buf));
+	if ((flags & 7) == _O_RDONLY) {
+		ret = CreateFileW(buf, GENERIC_READ, FILE_SHARE_READ,
+			  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	} else {
+		lwsl_err("%s: open for write not implemented\n", __func__);
+		*filelen = 0;
+		return LWS_INVALID_FILE;
+	}
+
+	if (ret != LWS_INVALID_FILE)
+		*filelen = GetFileSize(ret, NULL);
+
+	return ret;
+}
+
+static int
+_lws_plat_file_close(struct lws *wsi, lws_filefd_type fd)
+{
+	(void)wsi;
+
+	CloseHandle((HANDLE)fd);
+
+	return 0;
+}
+
+static unsigned long
+_lws_plat_file_seek_cur(struct lws *wsi, lws_filefd_type fd, long offset)
+{
+	(void)wsi;
+
+	return SetFilePointer((HANDLE)fd, offset, NULL, FILE_CURRENT);
+}
+
+static int
+_lws_plat_file_read(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		    unsigned char* buf, unsigned long len)
+{
+	DWORD _amount;
+
+	(void *)wsi;
+	if (!ReadFile((HANDLE)fd, buf, (DWORD)len, &_amount, NULL)) {
+		*amount = 0;
+
+		return 1;
+	}
+
+	*amount = (unsigned long)_amount;
+
+	return 0;
+}
+
+static int
+_lws_plat_file_write(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		     unsigned char* buf, unsigned long len)
+{
+	(void)wsi;
+	(void)fd;
+	(void)amount;
+	(void)buf;
+	(void)len;
+
+	lwsl_err("%s: not implemented yet on this platform\n", __func__);
+
+	return -1;
+}
+
+LWS_VISIBLE int
+lws_plat_init(struct lws_context *context,
+	      struct lws_context_creation_info *info)
+{
+	int i;
+
+	for (i = 0; i < FD_HASHTABLE_MODULUS; i++) {
+		context->fd_hashtable[i].wsi =
+			lws_zalloc(sizeof(struct lws*) * context->max_fds);
+
+		if (!context->fd_hashtable[i].wsi)
+			return -1;
+	}
+
+	context->events = lws_malloc(sizeof(WSAEVENT) * (context->max_fds + 1));
+	if (context->events == NULL) {
+		lwsl_err("Unable to allocate events array for %d connections\n",
+			context->max_fds);
+		return 1;
+	}
+
+	context->fds_count = 0;
+	context->events[0] = WSACreateEvent();
+
+	context->fd_random = 0;
+
+	context->fops.open	= _lws_plat_file_open;
+	context->fops.close	= _lws_plat_file_close;
+	context->fops.seek_cur	= _lws_plat_file_seek_cur;
+	context->fops.read	= _lws_plat_file_read;
+	context->fops.write	= _lws_plat_file_write;
+
+	return 0;
 }

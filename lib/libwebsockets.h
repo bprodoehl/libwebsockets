@@ -22,49 +22,6 @@
 #ifndef LIBWEBSOCKET_H_3060898B846849FF9F88F5DB59B5950C
 #define LIBWEBSOCKET_H_3060898B846849FF9F88F5DB59B5950C
 
-/* old (pre 1.6) api name compatibility defines */
-
-#define libwebsocket_create_context lws_create_context
-#define libwebsocket_set_proxy lws_set_proxy
-#define libwebsocket_context_destroy lws_context_destroy
-#define libwebsocket_service lws_service
-#define libwebsocket_cancel_service lws_cancel_service
-#define libwebsocket_sigint_cfg lws_sigint_cfg
-#define libwebsocket_initloop lws_initloop
-#define libwebsocket_sigint_cb lws_sigint_cb
-#define libwebsocket_service_fd lws_service_fd
-#define libwebsocket_context_user lws_context_user
-#define libwebsocket_set_timeout lws_set_timeout
-#define libwebsocket_write lws_write
-#define libwebsockets_serve_http_file_fragment lws_serve_http_file_fragment
-#define libwebsockets_serve_http_file lws_serve_http_file
-#define libwebsockets_return_http_status lws_return_http_status
-#define libwebsockets_get_protocol lws_get_protocol
-#define libwebsocket_callback_on_writable_all_protocol lws_callback_on_writable_all_protocol
-#define libwebsocket_callback_on_writable lws_callback_on_writable
-#define libwebsocket_callback_all_protocol lws_callback_all_protocol
-#define libwebsocket_get_socket_fd lws_get_socket_fd
-#define libwebsocket_is_final_fragment lws_is_final_fragment
-#define libwebsocket_get_reserved_bits lws_get_reserved_bits
-#define libwebsocket_rx_flow_control lws_rx_flow_control
-#define libwebsocket_rx_flow_allow_all_protocol lws_rx_flow_allow_all_protocol
-#define libwebsockets_remaining_packet_payload lws_remaining_packet_payload
-#define libwebsocket_client_connect lws_client_connect
-#define libwebsocket_canonical_hostname lws_canonical_hostname
-#define libwebsockets_get_peer_addresses lws_get_peer_addresses
-#define libwebsockets_get_random lws_get_random
-#define libwebsockets_SHA1 lws_SHA1
-#define libwebsocket_read lws_read
-#define libwebsocket_get_internal_extensions lws_get_internal_extensions
-#define libwebsocket_write_protocol lws_write_protocol
-
-#define libwebsocket_protocols lws_protocols
-#define libwebsocket_extension lws_extension
-#define libwebsocket_context lws_context
-#define libwebsocket_pollfd lws_pollfd
-#define libwebsocket_callback_reasons lws_callback_reasons
-#define libwebsocket lws
-
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdarg>
@@ -148,24 +105,21 @@ extern "C" {
 #include "lws_config.h"
 
 #if defined(WIN32) || defined(_WIN32)
-#if (WINVER < 0x0501)
-#undef WINVER
-#undef _WIN32_WINNT
-#define WINVER 0x0501
-#define _WIN32_WINNT WINVER
-#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <basetsd.h>
+#include <fcntl.h>
 
 #define strcasecmp stricmp
 #define getdtablesize() 30000
 
+#define LWS_INLINE __inline
 #define LWS_VISIBLE
 
 #ifdef LWS_DLL
@@ -178,14 +132,22 @@ extern "C" {
 #define LWS_EXTERN
 #endif
 
-#else // NOT WIN32
+#define LWS_INVALID_FILE INVALID_HANDLE_VALUE
+#define LWS_O_RDONLY _O_RDONLY
+
+#else /* NOT WIN32 */
 #include <unistd.h>
+
+#define LWS_INLINE inline
+#define LWS_O_RDONLY O_RDONLY
 
 #ifndef MBED_OPERATORS
 #include <poll.h>
 #include <netdb.h>
+#define LWS_INVALID_FILE -1
 #else
 #define getdtablesize() (20)
+#define LWS_INVALID_FILE NULL
 #endif
 
 #if defined(__GNUC__)
@@ -280,7 +242,7 @@ LWS_VISIBLE LWS_EXTERN void lwsl_hexdump(void *buf, size_t len);
 #define lwsl_hexdump(a, b)
 
 #endif
-
+struct lws;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
 /* api change list for user code to test against */
@@ -295,6 +257,9 @@ LWS_VISIBLE LWS_EXTERN void lwsl_hexdump(void *buf, size_t len);
 
 /* extra parameter introduced in 917f43ab821 */
 #define LWS_FEATURE_SERVE_HTTP_FILE_HAS_OTHER_HEADERS_LEN
+
+/* File operations stuff exists */
+#define LWS_FEATURE_FOPS
 
 /*
  * NOTE: These public enums are part of the abi.  If you want to add one,
@@ -366,20 +331,21 @@ enum lws_callback_reasons {
 };
 
 
-#if defined(_WIN32) && (_WIN32_WINNT < 0x0600)
+#if defined(_WIN32)
 typedef SOCKET lws_sockfd_type;
+typedef HANDLE lws_filefd_type;
 #define lws_sockfd_valid(sfd) (!!sfd)
 struct lws_pollfd {
-	lws_sockfd_type fd;
-	SHORT events;
-	SHORT revents;
+    lws_sockfd_type fd;
+    SHORT events;
+    SHORT revents;
 };
-WINSOCK_API_LINKAGE int WSAAPI WSAPoll(struct lws_pollfd fdArray[], ULONG fds, INT timeout);
 #else
 
 #if defined(MBED_OPERATORS)
 /* it's a class lws_conn * */
 typedef void * lws_sockfd_type;
+typedef void * lws_filefd_type;
 #define lws_sockfd_valid(sfd) (!!sfd)
 struct pollfd {
 	lws_sockfd_type fd;
@@ -401,18 +367,49 @@ void mbed3_tcp_stream_bind(void *sock, int port, struct lws *);
 void mbed3_tcp_stream_accept(void *sock, struct lws *);
 #else
 typedef int lws_sockfd_type;
+typedef int lws_filefd_type;
 #define lws_sockfd_valid(sfd) (sfd >= 0)
 #endif
 
 #define lws_pollfd pollfd
 #endif
 
-// argument structure for all external poll related calls
-// passed in via 'in'
+/* argument structure for all external poll related calls
+ * passed in via 'in'
+ */
 struct lws_pollargs {
-    lws_sockfd_type fd;            // applicable file descriptor
-    int events;        // the new event mask
-    int prev_events;   // the previous event mask
+	lws_sockfd_type fd;		/* applicable socket descriptor */
+	int events;			/* the new event mask */
+	int prev_events;		/* the previous event mask */
+};
+
+/**
+ * struct lws_plat_file_ops - Platform-specific file operations
+ *
+ * These provide platform-agnostic ways to deal with filesystem access in the
+ * library and in the user code.
+ *
+ * @open:		Open file (always binary access if plat supports it)
+ *			 filelen is filled on exit to be the length of the file
+ *			 flags should be set to O_RDONLY or O_RDWR
+ * @close:		Close file
+ * @seek_cur:		Seek from current position
+ * @read:		Read fron file *amount is set on exit to amount read
+ * @write:		Write to file *amount is set on exit as amount written
+ */
+struct lws_plat_file_ops {
+	lws_filefd_type (*open)(struct lws *wsi, const char *filename,
+				unsigned long *filelen, int flags);
+	int (*close)(struct lws *wsi, lws_filefd_type fd);
+	unsigned long (*seek_cur)(struct lws *wsi, lws_filefd_type fd,
+				  long offset_from_cur_pos);
+	int (*read)(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		    unsigned char *buf, unsigned long len);
+	int (*write)(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		     unsigned char *buf, unsigned long len);
+
+	/* Add new things just above here ---^
+	 * This is part of the ABI, don't needlessly break compatibilty */
 };
 
 /*
@@ -608,8 +605,8 @@ enum lws_token_indexes {
 	WSI_INIT_TOKEN_MUXURL,
 };
 
-struct lws_token_limits {//
-    unsigned short token_limit[WSI_TOKEN_COUNT];
+struct lws_token_limits {
+	unsigned short token_limit[WSI_TOKEN_COUNT];
 };
 
 /*
@@ -764,7 +761,6 @@ struct lws_extension;
 
 /**
  * callback_function() - User server actions
- * @context:	Websockets context
  * @wsi:	Opaque websocket instance pointer
  * @reason:	The reason for the call
  * @user:	Pointer to per-session user data allocated by library
@@ -1049,10 +1045,10 @@ struct lws_extension;
  *		duration of wsi dereference from the other thread context.
  */
 LWS_VISIBLE LWS_EXTERN int
-callback(struct lws_context *context, struct lws *wsi,
-	 enum lws_callback_reasons reason, void *user, void *in, size_t len);
+callback(const struct lws *wsi, enum lws_callback_reasons reason, void *user,
+	 void *in, size_t len);
 
-typedef int (callback_function)(struct lws_context *context, struct lws *wsi,
+typedef int (callback_function)(struct lws *wsi,
 				enum lws_callback_reasons reason, void *user,
 				void *in, size_t len);
 
@@ -1116,12 +1112,12 @@ typedef int (callback_function)(struct lws_context *context, struct lws *wsi,
  *		set the lws_tokens token pointer to it.
  */
 LWS_VISIBLE LWS_EXTERN int
-extension_callback(struct lws_context *context, struct lws_extension *ext,
+extension_callback(struct lws_context *context, const struct lws_extension *ext,
 		   struct lws *wsi, enum lws_extension_callback_reasons reason,
 		   void *user, void *in, size_t len);
 
 typedef int (extension_callback_function)(struct lws_context *context,
-			struct lws_extension *ext, struct lws *wsi,
+			const struct lws_extension *ext, struct lws *wsi,
 			enum lws_extension_callback_reasons reason,
 			void *user, void *in, size_t len);
 #endif
@@ -1156,9 +1152,6 @@ typedef int (extension_callback_function)(struct lws_context *context,
  *		Accessible via lws_get_protocol(wsi)->user
  *		This should not be confused with wsi->user, it is not the same.
  *		The library completely ignores any value in here.
- * @owning_server:	the server init call fills in this opaque pointer when
- *		registering this protocol with the server.
- * @protocol_index: which protocol we are starting from zero
  *
  *	This structure represents one protocol supported by the server.  An
  *	array of these structures is passed to lws_create_server()
@@ -1177,13 +1170,8 @@ struct lws_protocols {
 	unsigned int id;
 	void *user;
 
-	/*
-	 * below are filled in on server init and can be left uninitialized,
-	 * no need for user to use them directly either
-	 */
-
-	struct lws_context *owning_server;
-	int protocol_index;
+	/* Add new things just above here ---^
+	 * This is part of the ABI, don't needlessly break compatibilty */
 };
 
 #ifndef LWS_NO_EXTENSIONS
@@ -1205,6 +1193,9 @@ struct lws_extension {
 	extension_callback_function *callback;
 	size_t per_session_data_size;
 	void *per_context_private_data;
+
+	/* Add new things just above here ---^
+	 * This is part of the ABI, don't needlessly break compatibilty */
 };
 #endif
 
@@ -1264,9 +1255,9 @@ struct lws_extension {
 struct lws_context_creation_info {
 	int port;
 	const char *iface;
-	struct lws_protocols *protocols;
-	struct lws_extension *extensions;
-	struct lws_token_limits *token_limits;
+	const struct lws_protocols *protocols;
+	const struct lws_extension *extensions;
+	const struct lws_token_limits *token_limits;
 	const char *ssl_private_key_password;
 	const char *ssl_cert_filepath;
 	const char *ssl_private_key_filepath;
@@ -1286,6 +1277,9 @@ struct lws_context_creation_info {
 #else /* maintain structure layout either way */
     	void *provided_client_ssl_ctx;
 #endif
+
+	/* Add new things just above here ---^
+	 * This is part of the ABI, don't needlessly break compatibilty */
 };
 
 LWS_VISIBLE LWS_EXTERN void
@@ -1314,38 +1308,24 @@ LWS_VISIBLE LWS_EXTERN const unsigned char *
 lws_token_to_string(enum lws_token_indexes token);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_add_http_header_by_name(struct lws_context *context,
-			    struct lws *wsi,
-			    const unsigned char *name,
-			    const unsigned char *value,
-			    int length,
-			    unsigned char **p,
-			    unsigned char *end);
+lws_add_http_header_by_name(struct lws *wsi, const unsigned char *name,
+			    const unsigned char *value, int length,
+			    unsigned char **p, unsigned char *end);
 LWS_VISIBLE LWS_EXTERN int
-lws_finalize_http_header(struct lws_context *context,
-			    struct lws *wsi,
-			    unsigned char **p,
-			    unsigned char *end);
+lws_finalize_http_header(struct lws *wsi, unsigned char **p,
+			 unsigned char *end);
 LWS_VISIBLE LWS_EXTERN int
-lws_add_http_header_by_token(struct lws_context *context,
-			    struct lws *wsi,
-			    enum lws_token_indexes token,
-			    const unsigned char *value,
-			    int length,
-			    unsigned char **p,
-			    unsigned char *end);
+lws_add_http_header_by_token(struct lws *wsi, enum lws_token_indexes token,
+			     const unsigned char *value, int length,
+			     unsigned char **p, unsigned char *end);
 LWS_VISIBLE LWS_EXTERN int
-lws_add_http_header_content_length(struct lws_context *context,
-			    struct lws *wsi,
-			    unsigned long content_length,
-			    unsigned char **p,
-			    unsigned char *end);
+lws_add_http_header_content_length(struct lws *wsi,
+				   unsigned long content_length,
+				   unsigned char **p, unsigned char *end);
 LWS_VISIBLE LWS_EXTERN int
-lws_add_http_header_status(struct lws_context *context,
-			    struct lws *wsi,
-			    unsigned int code,
-			    unsigned char **p,
-			    unsigned char *end);
+lws_add_http_header_status(struct lws *wsi,
+			   unsigned int code, unsigned char **p,
+			   unsigned char *end);
 
 LWS_EXTERN int
 lws_http_transaction_completed(struct lws *wsi);
@@ -1354,26 +1334,24 @@ lws_http_transaction_completed(struct lws *wsi);
 typedef void (lws_ev_signal_cb)(EV_P_ struct ev_signal *w, int revents);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_sigint_cfg(
-	struct lws_context *context,
-	int use_ev_sigint,
-	lws_ev_signal_cb* cb);
+lws_sigint_cfg(struct lws_context *context, int use_ev_sigint,
+	       lws_ev_signal_cb *cb);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_initloop(
-	struct lws_context *context, struct ev_loop *loop);
+lws_initloop(struct lws_context *context, struct ev_loop *loop);
 
 LWS_VISIBLE void
-lws_sigint_cb(
-	struct ev_loop *loop, struct ev_signal *watcher, int revents);
+lws_sigint_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
 #endif /* LWS_USE_LIBEV */
 
 LWS_VISIBLE LWS_EXTERN int
-lws_service_fd(struct lws_context *context,
-		struct lws_pollfd *pollfd);
+lws_service_fd(struct lws_context *context, struct lws_pollfd *pollfd);
 
 LWS_VISIBLE LWS_EXTERN void *
 lws_context_user(struct lws_context *context);
+
+LWS_VISIBLE LWS_EXTERN void *
+lws_wsi_user(struct lws *wsi);
 
 /*
  * NOTE: These public enums are part of the abi.  If you want to add one,
@@ -1418,8 +1396,7 @@ lws_set_timeout(struct lws *wsi, enum pending_timeout reason, int secs);
  *   // fill your part of the buffer... for example here it's all zeros
  *   memset(&buf[LWS_SEND_BUFFER_PRE_PADDING], 0, 128);
  *
- *   lws_write(wsi, &buf[LWS_SEND_BUFFER_PRE_PADDING], 128,
- *   								LWS_WRITE_TEXT);
+ *   lws_write(wsi, &buf[LWS_SEND_BUFFER_PRE_PADDING], 128, LWS_WRITE_TEXT);
  *
  * When sending LWS_WRITE_HTTP, there is no protocol addition and you can just
  * use the whole buffer without taking care of the above.
@@ -1447,9 +1424,9 @@ lws_set_timeout(struct lws *wsi, enum pending_timeout reason, int secs);
 #endif
 
 #if __x86_64__
-#define _LWS_PAD_SIZE 16       // Intel recommended for best performance.
+#define _LWS_PAD_SIZE 16	/* Intel recommended for best performance */
 #else
-#define _LWS_PAD_SIZE LWS_SIZEOFPTR   /* Size of a pointer on the target architecture */
+#define _LWS_PAD_SIZE LWS_SIZEOFPTR   /* Size of a pointer on the target arch */
 #endif
 #define _LWS_PAD(n) (((n) % _LWS_PAD_SIZE) ? \
 		((n) + (_LWS_PAD_SIZE - ((n) % _LWS_PAD_SIZE))) : (n))
@@ -1465,27 +1442,28 @@ lws_write(struct lws *wsi, unsigned char *buf, size_t len,
 	lws_write(wsi, (unsigned char *)(buf), len, LWS_WRITE_HTTP)
 
 LWS_VISIBLE LWS_EXTERN int
-lws_serve_http_file(struct lws_context *context, struct lws *wsi,
-		    const char *file, const char *content_type,
+lws_serve_http_file(struct lws *wsi, const char *file, const char *content_type,
 		    const char *other_headers, int other_headers_len);
 LWS_VISIBLE LWS_EXTERN int
-lws_serve_http_file_fragment(struct lws_context *context, struct lws *wsi);
+lws_serve_http_file_fragment(struct lws *wsi);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_return_http_status(struct lws_context *context, struct lws *wsi,
-		       unsigned int code, const char *html_body);
+lws_return_http_status(struct lws *wsi, unsigned int code,
+		       const char *html_body);
 
 LWS_VISIBLE LWS_EXTERN const struct lws_protocols *
 lws_get_protocol(struct lws *wsi);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_callback_on_writable(struct lws_context *context, struct lws *wsi);
+lws_callback_on_writable(struct lws *wsi);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_callback_on_writable_all_protocol(const struct lws_protocols *protocol);
+lws_callback_on_writable_all_protocol(const struct lws_context *context,
+				      const struct lws_protocols *protocol);
 
 LWS_VISIBLE LWS_EXTERN int
-lws_callback_all_protocol(const struct lws_protocols *protocol, int reason);
+lws_callback_all_protocol(struct lws_context *context,
+			  const struct lws_protocols *protocol, int reason);
 
 LWS_VISIBLE LWS_EXTERN int
 lws_get_socket_fd(struct lws *wsi);
@@ -1500,7 +1478,8 @@ LWS_VISIBLE LWS_EXTERN int
 lws_rx_flow_control(struct lws *wsi, int enable);
 
 LWS_VISIBLE LWS_EXTERN void
-lws_rx_flow_allow_all_protocol(const struct lws_protocols *protocol);
+lws_rx_flow_allow_all_protocol(const struct lws_context *context,
+			       const struct lws_protocols *protocol);
 
 LWS_VISIBLE LWS_EXTERN size_t
 lws_remaining_packet_payload(struct lws *wsi);
@@ -1542,7 +1521,7 @@ lws_canonical_hostname(struct lws_context *context);
 
 
 LWS_VISIBLE LWS_EXTERN void
-lws_get_peer_addresses(struct lws_context *context, struct lws *wsi,
+lws_get_peer_addresses(struct lws *wsi,
 		       lws_sockfd_type fd, char *name, int name_len,
 		       char *rip, int rip_len);
 
@@ -1584,9 +1563,77 @@ lws_get_library_version(void);
 LWS_VISIBLE LWS_EXTERN int
 lws_hdr_total_length(struct lws *wsi, enum lws_token_indexes h);
 
+/*
+ * copies the whole, aggregated header, even if it was delivered in
+ * several actual headers piece by piece
+ */
 LWS_VISIBLE LWS_EXTERN int
-lws_hdr_copy(struct lws *wsi, char *dest, int len,
-	     enum lws_token_indexes h);
+lws_hdr_copy(struct lws *wsi, char *dest, int len, enum lws_token_indexes h);
+
+/*
+ * copies only fragment frag_idx of a header.  Normally this is only useful
+ * to parse URI arguments like ?x=1&y=2, oken index WSI_TOKEN_HTTP_URI_ARGS
+ * fragment 0 will contain "x=1" and fragment 1 "y=2"
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_hdr_copy_fragment(struct lws *wsi, char *dest, int len,
+		      enum lws_token_indexes h, int frag_idx);
+
+/* get the active file operations struct */
+LWS_VISIBLE LWS_EXTERN struct lws_plat_file_ops *
+lws_get_fops(struct lws_context *context);
+
+LWS_VISIBLE LWS_EXTERN struct lws_context *
+lws_get_context(const struct lws *wsi);
+
+/*
+ * Wsi-associated File Operations access helpers
+ *
+ * Use these helper functions if you want to access a file from the perspective
+ * of a specific wsi, which is usually the case.  If you just want contextless
+ * file access, use the fops callbacks directly with NULL wsi instead of these
+ * helpers.
+ *
+ * If so, then it calls the platform handler or user overrides where present
+ * (as defined in info->fops)
+ *
+ * The advantage from all this is user code can be portable for file operations
+ * without having to deal with differences between platforms.
+ */
+
+static LWS_INLINE lws_filefd_type
+lws_plat_file_open(struct lws *wsi, const char *filename,
+		   unsigned long *filelen, int flags)
+{
+	return lws_get_fops(lws_get_context(wsi))->open(wsi, filename,
+						    filelen, flags);
+}
+
+static LWS_INLINE int
+lws_plat_file_close(struct lws *wsi, lws_filefd_type fd)
+{
+	return lws_get_fops(lws_get_context(wsi))->close(wsi, fd);
+}
+
+static LWS_INLINE unsigned long
+lws_plat_file_seek_cur(struct lws *wsi, lws_filefd_type fd, long offset)
+{
+	return lws_get_fops(lws_get_context(wsi))->seek_cur(wsi, fd, offset);
+}
+
+static LWS_INLINE int
+lws_plat_file_read(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		   unsigned char *buf, unsigned long len)
+{
+	return lws_get_fops(lws_get_context(wsi))->read(wsi, fd, amount, buf, len);
+}
+
+static LWS_INLINE int
+lws_plat_file_write(struct lws *wsi, lws_filefd_type fd, unsigned long *amount,
+		    unsigned char *buf, unsigned long len)
+{
+	return lws_get_fops(lws_get_context(wsi))->write(wsi, fd, amount, buf, len);
+}
 
 /*
  * Note: this is not normally needed as a user api.  It's provided in case it is
@@ -1594,8 +1641,7 @@ lws_hdr_copy(struct lws *wsi, char *dest, int len,
  */
 
 LWS_VISIBLE LWS_EXTERN int
-lws_read(struct lws_context *context, struct lws *wsi,
-	 unsigned char *buf, size_t len);
+lws_read(struct lws *wsi, unsigned char *buf, size_t len);
 
 #ifndef LWS_NO_EXTENSIONS
 LWS_VISIBLE LWS_EXTERN struct lws_extension *lws_get_internal_extensions();

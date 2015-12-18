@@ -33,9 +33,7 @@ static struct a_message ringbuffer[MAX_MESSAGE_QUEUE];
 static int ringbuffer_head;
 
 int
-callback_lws_mirror(struct lws_context *context,
-		    struct lws *wsi,
-		    enum lws_callback_reasons reason,
+callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
 		    void *user, void *in, size_t len)
 {
 	struct per_session_data__lws_mirror *pss =
@@ -71,7 +69,7 @@ callback_lws_mirror(struct lws_context *context,
 				lwsl_err("ERROR %d writing to mirror socket\n", n);
 				return -1;
 			}
-			if (n < ringbuffer[pss->ringbuffer_tail].len)
+			if (n < (int)ringbuffer[pss->ringbuffer_tail].len)
 				lwsl_err("mirror partial write %d vs %d\n",
 				       n, ringbuffer[pss->ringbuffer_tail].len);
 
@@ -82,22 +80,13 @@ callback_lws_mirror(struct lws_context *context,
 
 			if (((ringbuffer_head - pss->ringbuffer_tail) &
 				  (MAX_MESSAGE_QUEUE - 1)) == (MAX_MESSAGE_QUEUE - 15))
-				lws_rx_flow_allow_all_protocol(
+				lws_rx_flow_allow_all_protocol(lws_get_context(wsi),
 					       lws_get_protocol(wsi));
 
 			if (lws_partial_buffered(wsi) || lws_send_pipe_choked(wsi)) {
-				lws_callback_on_writable(context, wsi);
+				lws_callback_on_writable(wsi);
 				break;
 			}
-			/*
-			 * for tests with chrome on same machine as client and
-			 * server, this is needed to stop chrome choking
-			 */
-#ifdef _WIN32
-			Sleep(1);
-#else
-			usleep(1);
-#endif
 		}
 		break;
 
@@ -108,7 +97,7 @@ callback_lws_mirror(struct lws_context *context,
 			goto choke;
 		}
 
- 		if (ringbuffer[ringbuffer_head].payload)
+		if (ringbuffer[ringbuffer_head].payload)
 			free(ringbuffer[ringbuffer_head].payload);
 
 		ringbuffer[ringbuffer_head].payload =
@@ -131,7 +120,7 @@ choke:
 		lws_rx_flow_control(wsi, 0);
 
 done:
-		lws_callback_on_writable_all_protocol(
+		lws_callback_on_writable_all_protocol(lws_get_context(wsi),
 					       lws_get_protocol(wsi));
 		break;
 

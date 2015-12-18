@@ -1,13 +1,14 @@
 #include "private-libwebsockets.h"
 
 struct lws *
-lws_client_connect_2(struct lws_context *context, struct lws *wsi)
+lws_client_connect_2(struct lws *wsi)
 {
 #ifdef LWS_USE_IPV6
 	struct sockaddr_in6 server_addr6;
 	struct sockaddr_in6 client_addr6;
 	struct addrinfo hints, *result;
 #endif
+	struct lws_context *context = wsi->context;
 	struct sockaddr_in server_addr4;
 	struct sockaddr_in client_addr4;
 	struct lws_pollfd pfd;
@@ -15,23 +16,23 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 	int n, plen = 0;
 	const char *ads;
 
-       lwsl_client("lws_client_connect_2\n");
+	lwsl_client("%s\n", __func__);
 
 	/* proxy? */
 
 	if (context->http_proxy_port) {
-		plen = sprintf((char *)context->service_buffer,
+		plen = sprintf((char *)context->serv_buf,
 			"CONNECT %s:%u HTTP/1.0\x0d\x0a"
 			"User-agent: libwebsockets\x0d\x0a",
 			lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS),
 			wsi->u.hdr.ah->c_port);
 
 		if (context->proxy_basic_auth_token[0])
-			plen += sprintf((char *)context->service_buffer + plen,
+			plen += sprintf((char *)context->serv_buf + plen,
 					"Proxy-authorization: basic %s\x0d\x0a",
 					context->proxy_basic_auth_token);
 
-		plen += sprintf((char *)context->service_buffer + plen,
+		plen += sprintf((char *)context->serv_buf + plen,
 				"\x0d\x0a");
 
 		ads = context->http_proxy_address;
@@ -63,8 +64,10 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 #ifdef LWS_USE_IPV6
 	if (LWS_IPV6_ENABLED(context)) {
 		memset(&hints, 0, sizeof(struct addrinfo));
+#if !defined(__ANDROID__)
 		hints.ai_family = AF_INET6;
 		hints.ai_flags = AI_V4MAPPED;
+#endif
 		n = getaddrinfo(ads, NULL, &hints, &result);
 		if (n) {
 #ifdef _WIN32
@@ -77,6 +80,18 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 
 		server_addr6.sin6_family = AF_INET6;
 		switch (result->ai_family) {
+#if defined(__ANDROID__)
+		case AF_INET:
+			/* map IPv4 to IPv6 */
+			bzero((char *)&server_addr6.sin6_addr,
+						sizeof(struct in6_addr));
+			server_addr6.sin6_addr.s6_addr[10] = 0xff;
+			server_addr6.sin6_addr.s6_addr[11] = 0xff;
+			memcpy(&server_addr6.sin6_addr.s6_addr[12],
+				&((struct sockaddr_in *)result->ai_addr)->sin_addr,
+							sizeof(struct in_addr));
+			break;
+#endif
 		case AF_INET6:
 			memcpy(&server_addr6.sin6_addr,
 			  &((struct sockaddr_in6 *)result->ai_addr)->sin6_addr,
@@ -113,7 +128,7 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 
 			res = res->ai_next;
 		}
-		
+
 		if (!p) {
 			freeaddrinfo(result);
 			goto oom4;
@@ -145,9 +160,9 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 			goto oom4;
 		}
 
-		wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_CONNECT;
+		wsi->mode = LWSCM_WSCL_WAITING_CONNECT;
 
-		lws_libev_accept(context, wsi, wsi->sock);
+		lws_libev_accept(wsi, wsi->sock);
 		if (insert_wsi_socket_into_fds(context, wsi)) {
 			compatible_close(wsi->sock);
 			goto oom4;
@@ -204,7 +219,6 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 	}
 
 	if (connect(wsi->sock, v, n) == -1 || LWS_ERRNO == LWS_EISCONN) {
-
 		if (LWS_ERRNO == LWS_EALREADY ||
 		    LWS_ERRNO == LWS_EINPROGRESS ||
 		    LWS_ERRNO == LWS_EWOULDBLOCK
@@ -220,7 +234,7 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 			 */
 			if (lws_change_pollfd(wsi, 0, LWS_POLLOUT))
 				goto failed;
-			lws_libev_io(context, wsi, LWS_EV_START | LWS_EV_WRITE);
+			lws_libev_io(wsi, LWS_EV_START | LWS_EV_WRITE);
 
 			return wsi;
 		}
@@ -248,7 +262,7 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 			goto failed;
 		wsi->u.hdr.ah->c_port = context->http_proxy_port;
 
-		n = send(wsi->sock, (char *)context->service_buffer, plen,
+		n = send(wsi->sock, (char *)context->serv_buf, plen,
 			 MSG_NOSIGNAL);
 		if (n < 0) {
 			lwsl_debug("ERROR writing to proxy socket\n");
@@ -258,7 +272,7 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 		lws_set_timeout(wsi, PENDING_TIMEOUT_AWAITING_PROXY_RESPONSE,
 				AWAITING_TIMEOUT);
 
-		wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_PROXY_REPLY;
+		wsi->mode = LWSCM_WSCL_WAITING_PROXY_REPLY;
 
 		return wsi;
 	}
@@ -276,15 +290,13 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 	lws_set_timeout(wsi, PENDING_TIMEOUT_SENT_CLIENT_HANDSHAKE,
 			AWAITING_TIMEOUT);
 
-	wsi->mode = LWS_CONNMODE_WS_CLIENT_ISSUE_HANDSHAKE;
+	wsi->mode = LWSCM_WSCL_ISSUE_HANDSHAKE;
 	pfd.fd = wsi->sock;
 	pfd.revents = LWS_POLLIN;
 
 	n = lws_service_fd(context, &pfd);
-
 	if (n < 0)
 		goto failed;
-
 	if (n) /* returns 1 on failure after closing wsi */
 		return NULL;
 
@@ -293,10 +305,11 @@ lws_client_connect_2(struct lws_context *context, struct lws *wsi)
 oom4:
 	lws_free(wsi->u.hdr.ah);
 	lws_free(wsi);
+
 	return NULL;
 
 failed:
-	lws_close_and_free_session(context, wsi, LWS_CLOSE_STATUS_NOSTATUS);
+	lws_close_free_wsi(wsi, LWS_CLOSE_STATUS_NOSTATUS);
 
 	return NULL;
 }
@@ -333,6 +346,7 @@ lws_client_connect(struct lws_context *context, const char *address,
 	if (wsi == NULL)
 		goto bail;
 
+	wsi->context = context;
 	wsi->sock = LWS_SOCK_INVALID;
 
 	/* -1 means just use latest supported */
@@ -342,7 +356,7 @@ lws_client_connect(struct lws_context *context, const char *address,
 
 	wsi->ietf_spec_revision = ietf_version_or_minus_one;
 	wsi->user_space = NULL;
-	wsi->state = WSI_STATE_CLIENT_UNCONNECTED;
+	wsi->state = LWSS_CLIENT_UNCONNECTED;
 	wsi->protocol = NULL;
 	wsi->pending_timeout = NO_PENDING_TIMEOUT;
 
@@ -394,8 +408,8 @@ lws_client_connect(struct lws_context *context, const char *address,
 	 * can handle this and then we don't need an actual socket for this
 	 * connection.
 	 */
-	
-	if (lws_ext_callback_for_each_extension_type(context, wsi,
+
+	if (lws_ext_cb_all_exts(context, wsi,
 			LWS_EXT_CALLBACK_CAN_PROXY_CLIENT_CONNECTION,
 						     (void *)address, port) > 0) {
 		lwsl_client("lws_client_connect: ext handling conn\n");
@@ -404,12 +418,12 @@ lws_client_connect(struct lws_context *context, const char *address,
 			PENDING_TIMEOUT_AWAITING_EXTENSION_CONNECT_RESPONSE,
 			        AWAITING_TIMEOUT);
 
-		wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_EXTENSION_CONNECT;
+		wsi->mode = LWSCM_WSCL_WAITING_EXTENSION_CONNECT;
 		return wsi;
 	}
 	lwsl_client("lws_client_connect: direct conn\n");
 
-       return lws_client_connect_2(context, wsi);
+       return lws_client_connect_2(wsi);
 
 bail1:
 	lws_free(wsi->u.hdr.ah);
