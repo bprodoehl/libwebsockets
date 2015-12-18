@@ -1109,11 +1109,7 @@ message(" LWS_USE_LIBEV = ${LWS_USE_LIBEV}")
 message(" LWS_IPV6 = ${LWS_IPV6}")
 message(" LWS_WITH_HTTP2 = ${LWS_WITH_HTTP2}")
 message(" LWS_MBED3 = ${LWS_MBED3}")
-<<<<<<< HEAD
-=======
-message(" LWS_WITH_OLD_API_WRAPPERS = ${LWS_WITH_OLD_API_WRAPPERS}")
 message(" LWS_WITH_UNIX_DOMAIN_SOCKET = ${LWS_WITH_UNIX_DOMAIN_SOCKET}")
->>>>>>> origin/unix_domain_sockets
 message("---------------------------------------------------------------------")
 
 # These will be available to parent projects including libwebsockets using add_subdirectory()
