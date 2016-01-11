@@ -174,7 +174,7 @@ lws_change_pollfd(struct lws *wsi, int _and, int _or)
 
 		sampled_tid = context->service_tid;
 		if (sampled_tid) {
-			tid = context->protocols[0].callback(NULL,
+			tid = context->protocols[0].callback(wsi,
 				     LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
 			if (tid == -1)
 				return -1;
@@ -250,8 +250,8 @@ lws_callback_on_writable(struct lws *wsi)
 network_sock:
 #endif
 
-	if (lws_ext_cb_wsi_active_exts(wsi,
-				LWS_EXT_CALLBACK_REQUEST_ON_WRITEABLE, NULL, 0))
+	if (lws_ext_cb_active(wsi,
+				LWS_EXT_CB_REQUEST_ON_WRITEABLE, NULL, 0))
 		return 1;
 
 	if (wsi->position_in_fds_table < 0) {

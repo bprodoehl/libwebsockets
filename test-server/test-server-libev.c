@@ -1,5 +1,5 @@
 /*
- * libwebsockets-test-server - libwebsockets test implementation
+ * libwebsockets-test-server for libev - libwebsockets test implementation
  *
  * Copyright (C) 2010-2015 Andy Green <andy@warmcat.com>
  *
@@ -23,12 +23,6 @@
 
 int close_testing;
 int max_poll_elements;
-
-#ifdef EXTERNAL_POLL
-struct lws_pollfd *pollfds;
-int *fd_lookup;
-int count_pollfds;
-#endif
 volatile int force_exit = 0;
 struct lws_context *context;
 struct lws_plat_file_ops fops_plat;
@@ -36,6 +30,36 @@ struct lws_plat_file_ops fops_plat;
 /* http server gets files from this path */
 #define LOCAL_RESOURCE_PATH INSTALL_DATADIR"/libwebsockets-test-server"
 char *resource_path = LOCAL_RESOURCE_PATH;
+
+/*
+ * libev dumps their hygeine problems on their users blaming compiler
+ * http://lists.schmorp.de/pipermail/libev/2008q4/000442.html
+ */
+
+#if EV_MINPRI == EV_MAXPRI
+# define _ev_set_priority(ev, pri) ((ev), (pri))
+#else
+# define _ev_set_priority(ev, pri) { \
+	ev_watcher *evw = (ev_watcher *)(void *)ev; \
+	evw->priority = pri; \
+}
+#endif
+
+#define _ev_init(ev,cb_) {  \
+	ev_watcher *evw = (ev_watcher *)(void *)ev; \
+\
+	evw->active = evw->pending = 0; \
+	_ev_set_priority((ev), 0); \
+	ev_set_cb((ev), cb_); \
+}
+
+#define _ev_timer_init(ev, cb, after, _repeat) { \
+	ev_watcher_time *evwt = (ev_watcher_time *)(void *)ev; \
+\
+	_ev_init(ev, cb); \
+	evwt->at = after; \
+	(ev)->repeat = _repeat; \
+}
 
 /* singlethreaded version --> no locks */
 
@@ -67,7 +91,6 @@ enum demo_protocols {
 
 	PROTOCOL_DUMB_INCREMENT,
 	PROTOCOL_LWS_MIRROR,
-	PROTOCOL_LWS_ECHOGEN,
 
 	/* always last */
 	DEMO_PROTOCOL_COUNT
@@ -96,12 +119,6 @@ static struct lws_protocols protocols[] = {
 		sizeof(struct per_session_data__lws_mirror),
 		128,
 	},
-	{
-		"lws-echogen",
-		callback_lws_echogen,
-		sizeof(struct per_session_data__echogen),
-		128,
-	},
 	{ NULL, NULL, 0, 0 } /* terminator */
 };
 
@@ -125,27 +142,28 @@ test_server_fops_open(struct lws *wsi, const char *filename,
 	return n;
 }
 
-void sighandler(int sig)
+void signal_cb(struct ev_loop *loop, struct ev_signal* watcher, int revents)
 {
+	lwsl_notice("Signal caught, exiting...\n");
 	force_exit = 1;
-	lws_cancel_service(context);
+	switch (watcher->signum) {
+	case SIGTERM:
+	case SIGINT:
+		ev_break(loop, EVBREAK_ALL);
+		break;
+	default:
+		signal(SIGABRT, SIG_DFL);
+		abort();
+		break;
+	}
 }
 
-static const struct lws_extension exts[] = {
-	{
-		"permessage-deflate",
-		lws_extension_callback_pm_deflate,
-		"permessage-deflate"
-	},
-	{
-		"deflate-frame",
-		lws_extension_callback_pm_deflate,
-		"deflate_frame"
-	},
-	{ NULL, NULL, NULL /* terminator */ }
-};
-
-
+static void
+ev_timeout_cb (EV_P_ ev_timer *w, int revents)
+{
+	lws_callback_on_writable_all_protocol(context,
+					&protocols[PROTOCOL_DUMB_INCREMENT]);
+}
 
 static struct option options[] = {
 	{ "help",	no_argument,		NULL, 'h' },
@@ -160,20 +178,21 @@ static struct option options[] = {
 	{ "daemonize", 	no_argument,		NULL, 'D' },
 #endif
 	{ "resource_path", required_argument,	NULL, 'r' },
-	{ "host", required_argument,	NULL, 'H' },
 	{ NULL, 0, 0, 0 }
 };
 
 int main(int argc, char **argv)
 {
+	int sigs[] = { SIGINT, SIGKILL, SIGTERM, SIGSEGV, SIGFPE };
+	struct ev_signal signals[ARRAY_SIZE(sigs)];
+	struct ev_loop *loop = ev_default_loop(0);
 	struct lws_context_creation_info info;
 	char interface_name[128] = "";
-	unsigned int ms, oldms = 0;
 	const char *iface = NULL;
-	const char *host = NULL;
+	ev_timer timeout_watcher;
 	char cert_path[1024];
 	char key_path[1024];
- 	int debug_level = 7;
+	int debug_level = 7;
 	int use_ssl = 0;
 	int opts = 0;
 	int n = 0;
@@ -181,7 +200,7 @@ int main(int argc, char **argv)
 	int syslog_options = LOG_PID | LOG_PERROR;
 #endif
 #ifndef LWS_NO_DAEMONIZE
- 	int daemonize = 0;
+	int daemonize = 0;
 #endif
 
 	/*
@@ -192,7 +211,7 @@ int main(int argc, char **argv)
 	info.port = 7681;
 
 	while (n >= 0) {
-		n = getopt_long(argc, argv, "eci:hsap:d:Dr:H:", options, NULL);
+		n = getopt_long(argc, argv, "eci:hsap:d:Dr:", options, NULL);
 		if (n < 0)
 			continue;
 		switch (n) {
@@ -234,35 +253,11 @@ int main(int argc, char **argv)
 			resource_path = optarg;
 			printf("Setting resource path to \"%s\"\n", resource_path);
 			break;
-		case 'H':
-			host = optarg;
-			//printf("Setting host to \"%s\"\n", host);
-			{
-				int protocol_length;
-				// See if its a UNIX domain socket
-				protocol_length = strlen("unix://");
-				if (strlen(host) > protocol_length &&
-				    strncmp(host, "unix://", protocol_length) == 0) {
-					opts |= LWS_SERVER_OPTION_UNIX_SOCK;
-					strncpy(interface_name, host + protocol_length, sizeof interface_name);
-					interface_name[(sizeof interface_name) - 1] = '\0';
-					iface = interface_name;
-					printf("Using UNIX domain socket @ %s\n", iface);
-				}
-			}
-			break;
 		case 'h':
 			fprintf(stderr, "Usage: test-server "
-					"[--port=<p>] [--ssl] [--allow-non-ssl] "
-					"[-i <interface>] "
-					"[--closetest] "
-					"[--libev] "
-#ifndef LWS_NO_DAEMONIZE
-					"[--daemonize] "
-#endif
+					"[--port=<p>] [--ssl] "
 					"[-d <log bitfield>] "
-					"[--resource_path <path>] "
-					"[--host <>]\n");
+					"[--resource_path <path>]\n");
 			exit(1);
 		}
 	}
@@ -279,7 +274,11 @@ int main(int argc, char **argv)
 	}
 #endif
 
-	signal(SIGINT, sighandler);
+	for (n = 0; n < ARRAY_SIZE(sigs); n++) {
+		_ev_init(&signals[n], signal_cb);
+		ev_signal_set(&signals[n], sigs[n]);
+		ev_signal_start(loop, &signals[n]);
+	}
 
 #ifndef _WIN32
 	/* we will only try to log things according to our debug_level */
@@ -295,18 +294,13 @@ int main(int argc, char **argv)
 						    "licensed under LGPL2.1\n");
 
 	printf("Using resource path \"%s\"\n", resource_path);
-#ifdef EXTERNAL_POLL
-	max_poll_elements = getdtablesize();
-	pollfds = malloc(max_poll_elements * sizeof (struct lws_pollfd));
-	fd_lookup = malloc(max_poll_elements * sizeof (int));
-	if (pollfds == NULL || fd_lookup == NULL) {
-		lwsl_err("Out of memory pollfds=%d\n", max_poll_elements);
-		return -1;
-	}
-#endif
 
 	info.iface = iface;
 	info.protocols = protocols;
+#ifndef LWS_NO_EXTENSIONS
+	info.extensions = lws_get_internal_extensions();
+#endif
+
 	info.ssl_cert_filepath = NULL;
 	info.ssl_private_key_filepath = NULL;
 
@@ -330,15 +324,16 @@ int main(int argc, char **argv)
 	info.gid = -1;
 	info.uid = -1;
 	info.max_http_header_pool = 1;
-	info.options = opts | LWS_SERVER_OPTION_VALIDATE_UTF8;
-	info.extensions = exts;
+	info.options = opts | LWS_SERVER_OPTION_LIBEV;
+
 	context = lws_create_context(&info);
 	if (context == NULL) {
 		lwsl_err("libwebsocket init failed\n");
 		return -1;
 	}
 
-	/* this shows how to override the lws file operations.  You don't need
+	/*
+	 * this shows how to override the lws file operations.  You don't need
 	 * to do any of this unless you have a reason (eg, want to serve
 	 * compressed files without decompressing the whole archive)
 	 */
@@ -347,65 +342,16 @@ int main(int argc, char **argv)
 	/* override the active fops */
 	lws_get_fops(context)->open = test_server_fops_open;
 
-	n = 0;
-	while (n >= 0 && !force_exit) {
-		struct timeval tv;
+	lws_initloop(context, loop);
 
-		gettimeofday(&tv, NULL);
+	_ev_timer_init(&timeout_watcher, ev_timeout_cb, 0.05, 0.05);
+	ev_timer_start(loop, &timeout_watcher);
 
-		/*
-		 * This provokes the LWS_CALLBACK_SERVER_WRITEABLE for every
-		 * live websocket connection using the DUMB_INCREMENT protocol,
-		 * as soon as it can take more packets (usually immediately)
-		 */
-
-		ms = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-		if ((ms - oldms) > 50) {
-			lws_callback_on_writable_all_protocol(context,
-				&protocols[PROTOCOL_DUMB_INCREMENT]);
-			oldms = ms;
-		}
-
-#ifdef EXTERNAL_POLL
-		/*
-		 * this represents an existing server's single poll action
-		 * which also includes libwebsocket sockets
-		 */
-
-		n = poll(pollfds, count_pollfds, 50);
-		if (n < 0)
-			continue;
-
-		if (n)
-			for (n = 0; n < count_pollfds; n++)
-				if (pollfds[n].revents)
-					/*
-					* returns immediately if the fd does not
-					* match anything under libwebsockets
-					* control
-					*/
-					if (lws_service_fd(context,
-								  &pollfds[n]) < 0)
-						goto done;
-#else
-		/*
-		 * If libwebsockets sockets are all we care about,
-		 * you can use this api which takes care of the poll()
-		 * and looping through finding who needed service.
-		 *
-		 * If no socket needs service, it'll return anyway after
-		 * the number of ms in the second argument.
-		 */
-
-		n = lws_service(context, 50);
-#endif
-	}
-
-#ifdef EXTERNAL_POLL
-done:
-#endif
+	while (!force_exit)
+		ev_run(loop, 0);
 
 	lws_context_destroy(context);
+	ev_loop_destroy(loop);
 
 	lwsl_notice("libwebsockets-test-server exited cleanly\n");
 

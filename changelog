@@ -1,6 +1,194 @@
 Changelog
 ---------
 
+Extension Changes
+-----------------
+
+1) There is now a "permessage-deflate" / RFC7692 implementation.  It's very
+similar to "deflate-frame" we have offered for a long while; deflate-frame is
+now provided as an alias of permessage-deflate.
+
+The main differences are that the new permessage-deflate implementation:
+
+ - properly performs streaming respecting input and output buffer limits.  The
+   old deflate-frame implementation could only work on complete deflate input
+   and produce complete inflate output for each frame.  The new implementation
+   only mallocs buffers at initialization.
+
+ - goes around the event loop after each input package is processed allowing
+   interleaved output processing.  The RX flow control api can be used to
+   force compressed input processing to match the rate of compressed output
+   processing (test--echo shows an example of how to do this).
+
+ - when being "deflate-frame" for compatibility he uses the same default zlib
+   settings as the old "deflate-frame", but instead of exponentially increasing
+   malloc allocations until the whole output will fit, he observes the default
+   input and output chunking buffer sizes of "permessage-deflate", that's
+   1024 in and 1024 out at a time.
+
+2) deflate-stream has been disabled for many versions (for over a year) and is
+now removed.  Browsers are now standardizing on "permessage-deflate" / RFC7692
+
+3) struct lws_extension is simplified, and lws extensions now have a public
+api (their callback) for use in user code to compose extensions and options
+the user code wants.  lws_get_internal_exts() is deprecated but kept around
+as a NOP.  The changes allow one extension implementation to go by different
+names and allows the user client code to control option offers per-ext.
+
+The test client and server are updated to use the new way.  If you use
+the old way it should still work, but extensions will be disabled until you
+update your code.
+
+Extensions are now responsible for allocating and per-instance private struct
+at instance construction time and freeing it when the instance is destroyed.
+Not needing to know the size means the extension's struct can be opaque
+to user code.
+
+
+User api additions
+------------------
+
+1) The info struct gained two new members
+
+ - max_http_header_data: 0 for default (1024) or set the maximum amount of known
+    http header payload that lws can deal with.  Payload in unknown http
+    headers is dropped silently.  If for some reason you need to send huge
+    cookies or other HTTP-level headers, you can now increase this at context-
+    creation time.
+
+ - max_http_header_pool: 0 for default (16) or set the maximum amount of http
+     headers that can be tracked by lws in this context.  For the server, if
+     the header pool is completely in use then accepts on the listen socket
+     are disabled until one becomes free.  For the client, if you simultaneously
+     have pending connects for more than this number of client connections,
+     additional connects will fail until some of the pending connections timeout
+     or complete.
+
+HTTP header processing in lws only exists until just after the first main
+callback after the HTTP handshake... for ws connections that is ESTABLISHED and
+for HTTP connections the HTTP callback.
+
+So these settings are not related to the maximum number of simultaneous
+connections, but the number of HTTP handshakes that may be expected or ongoing,
+or have just completed, at one time.  The reason it's useful is it changes the
+memory allocation for header processing to be one-time at context creation
+instead of every time there is a new connection, and gives you control over
+the peak allocation.
+
+Setting max_http_header_pool to 1 is fine it will just queue incoming
+connections before the accept as necessary, you can still have as many
+simultaneous post-header connections as you like.  Since the http header
+processing is completed and the allocation released after ESTABLISHED or the
+HTTP callback, even with a pool of 1 many connections can be handled rapidly.
+
+2) There is a new callback that allows the user code to get acccess to the
+optional close code + aux data that may have been sent by the peer.
+
+LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
+             The peer has sent an unsolicited Close WS packet.  @in and
+             @len are the optional close code (first 2 bytes, network
+             order) and the optional additional information which is not
+             defined in the standard, and may be a string or non-human-
+             readble data.
+             If you return 0 lws will echo the close and then close the
+             connection.  If you return nonzero lws will just close the
+             connection.
+
+As usual not handling it does the right thing, if you're not interested in it
+just ignore it.
+
+The test server has "open and close" testing buttons at the bottom, if you
+open and close that connection, on close it will send a close code 3000 decimal
+and the string "Bye!" as the aux data.
+
+The test server dumb-increment callback handles this callback reason and prints
+
+lwsts[15714]: LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: len 6
+lwsts[15714]:  0: 0x0B
+lwsts[15714]:  1: 0xB8
+lwsts[15714]:  2: 0x42
+lwsts[15714]:  3: 0x79
+lwsts[15714]:  4: 0x65
+lwsts[15714]:  5: 0x21
+
+3) There is a new API to allow the user code to control the content of the
+close frame sent when about to return nonzero from the user callback to
+indicate the connection should close.
+
+/**
+ * lws_close_reason - Set reason and aux data to send with Close packet
+ *		If you are going to return nonzero from the callback
+ *		requesting the connection to close, you can optionally
+ *		call this to set the reason the peer will be told if
+ *		possible.
+ *
+ * @wsi:	The websocket connection to set the close reason on
+ * @status:	A valid close status from websocket standard
+ * @buf:	NULL or buffer containing up to 124 bytes of auxiliary data
+ * @len:	Length of data in @buf to send
+ */
+LWS_VISIBLE LWS_EXTERN void
+lws_close_reason(struct lws *wsi, enum lws_close_status status,
+		 unsigned char *buf, size_t len);
+
+An extra button is added to the "open and close" test server page that requests
+that the test server close the connection from his end.
+
+The test server code will do so by
+
+			lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY,
+					 (unsigned char *)"seeya", 5);
+			return -1;
+
+The browser shows the close code and reason he received
+
+websocket connection CLOSED, code: 1001, reason: seeya
+
+3) There's a new context creation time option flag
+
+LWS_SERVER_OPTION_VALIDATE_UTF8
+
+if you set it in info->options, then TEXT and CLOSE frames will get checked to
+confirm that they contain valid UTF-8.  If they don't, the connection will get
+closed by lws.
+
+
+User api changes
+----------------
+
+1) LWS_SEND_BUFFER_POST_PADDING is now 0 and deprecated.  You can remove it; if
+you still use it, obviously it does nothing.  Old binary code with nonzero
+LWS_SEND_BUFFER_POST_PADDING is perfectly compatible, the old code just
+allocated a buffer bigger than the library is going to use.
+
+The example apps no longer use LWS_SEND_BUFFER_POST_PADDING.
+
+The only path who made use of it was sending with LWS_WRITE_CLOSE --->
+
+2) Because of lws_close_reason() formalizing handling close frames,
+LWS_WRITE_CLOSE is removed from libwebsockets.h.  It was only of use to send
+close frames...close frame content should be managed using lws_close_reason()
+now.
+
+3) We check for invalid CLOSE codes and complain about protocol violation in
+our close code.  But it changes little since we were in the middle of closing
+anyway.
+
+4) zero-length RX frames and zero length TX frames are now allowed.
+
+5) Pings and close used to be limited to 124 bytes, the correct limit is 125
+so that is now also allowed.
+
+6) LWS_PRE is provided as a synonym for LWS_SEND_BUFFER_POST_PADDING, either is
+valid to use now.
+
+7) There's generic support for RFC7462 style extension options built into the
+library now.  As a consequence, a field "options" is added to lws_extension.
+It can be NULL if there are no options on the extension.  Extension internal
+info is part of the public abi because extensions may be implemented outside
+the library.
+
+
 v1.6.0-chrome48-firefox42
 =======================
 

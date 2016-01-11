@@ -57,14 +57,13 @@ callback_fraggle(struct lws *wsi, enum lws_callback_reasons reason,
 		 void *user, void *in, size_t len)
 {
 	int n;
-	unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + 8000 +
-			  LWS_SEND_BUFFER_POST_PADDING];
+	unsigned char buf[LWS_PRE + 8000];
 	struct per_session_data__fraggle *psf = user;
 	int chunk;
 	int write_mode = LWS_WRITE_CONTINUATION;
 	unsigned long sum;
 	unsigned char *p = (unsigned char *)in;
-	unsigned char *bp = &buf[LWS_SEND_BUFFER_PRE_PADDING];
+	unsigned char *bp = &buf[LWS_PRE];
 	int ran;
 
 	switch (reason) {
@@ -98,7 +97,7 @@ callback_fraggle(struct lws *wsi, enum lws_callback_reasons reason,
 
 		case FRAGSTATE_RANDOM_PAYLOAD:
 
-			for (n = 0; n < len; n++)
+			for (n = 0; (unsigned int)n < len; n++)
 				psf->sum += p[n];
 
 			psf->total_message += len;
@@ -185,9 +184,9 @@ callback_fraggle(struct lws *wsi, enum lws_callback_reasons reason,
 						  psf->total_message, psf->sum);
 
 			bp[0] = psf->sum >> 24;
-			bp[1] = psf->sum >> 16;
-			bp[2] = psf->sum >> 8;
-			bp[3] = psf->sum;
+			bp[1] = (unsigned char)(psf->sum >> 16);
+			bp[2] = (unsigned char)(psf->sum >> 8);
+			bp[3] = (unsigned char)psf->sum;
 
 			n = lws_write(wsi, (unsigned char *)bp,
 							   4, LWS_WRITE_BINARY);

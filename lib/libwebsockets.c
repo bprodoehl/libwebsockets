@@ -52,7 +52,19 @@ lws_free_wsi(struct lws *wsi)
 
 	lws_free_set_NULL(wsi->rxflow_buffer);
 	lws_free_set_NULL(wsi->trunc_alloc);
-	lws_free_header_table(wsi);
+	/*
+	 * These union members have an ah at the start
+	 *
+	 * 	struct _lws_http_mode_related http;
+	 *	struct _lws_http2_related http2;
+	 *	struct _lws_header_related hdr;
+	 *
+	 * basically ws-related union member does not
+	 */
+	if (wsi->mode != LWSCM_WS_CLIENT &&
+	    wsi->mode != LWSCM_WS_SERVING)
+		if (wsi->u.hdr.ah)
+			lws_free_header_table(wsi);
 	lws_free(wsi);
 }
 
@@ -62,8 +74,6 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 	struct lws_context *context = wsi->context;
 	int n, m, ret, old_state;
 	struct lws_tokens eff_buf;
-	unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + 2 +
-			  LWS_SEND_BUFFER_POST_PADDING];
 
 	if (!wsi)
 		return;
@@ -107,8 +117,6 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 		break;
 	}
 
-	wsi->u.ws.close_reason = reason;
-
 	if (wsi->mode == LWSCM_WSCL_WAITING_CONNECT ||
 	    wsi->mode == LWSCM_WSCL_ISSUE_HANDSHAKE)
 		goto just_kill_connection;
@@ -122,8 +130,8 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 	 * parent and just his ch1 aspect is closing?
 	 */
 
-	if (lws_ext_cb_wsi_active_exts(wsi,
-		      LWS_EXT_CALLBACK_CHECK_OK_TO_REALLY_CLOSE, NULL, 0) > 0) {
+	if (lws_ext_cb_active(wsi,
+		      LWS_EXT_CB_CHECK_OK_TO_REALLY_CLOSE, NULL, 0) > 0) {
 		lwsl_ext("extension vetoed close\n");
 		return;
 	}
@@ -140,8 +148,8 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 
 		/* show every extension the new incoming data */
 
-		m = lws_ext_cb_wsi_active_exts(wsi,
-			  LWS_EXT_CALLBACK_FLUSH_PENDING_TX, &eff_buf, 0);
+		m = lws_ext_cb_active(wsi,
+			  LWS_EXT_CB_FLUSH_PENDING_TX, &eff_buf, 0);
 		if (m < 0) {
 			lwsl_ext("Extension reports fatal error\n");
 			goto just_kill_connection;
@@ -177,13 +185,24 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 	 */
 
 	if (old_state == LWSS_ESTABLISHED &&
-	    reason != LWS_CLOSE_STATUS_NOSTATUS &&
-	    reason != LWS_CLOSE_STATUS_NOSTATUS_CONTEXT_DESTROY) {
+	    (wsi->u.ws.close_in_ping_buffer_len || /* already a reason */
+	     (reason != LWS_CLOSE_STATUS_NOSTATUS &&
+	     (reason != LWS_CLOSE_STATUS_NOSTATUS_CONTEXT_DESTROY)))) {
 		lwsl_debug("sending close indication...\n");
-		/* make valgrind happy */
-		memset(buf, 0, sizeof(buf));
-		n = lws_write(wsi, &buf[LWS_SEND_BUFFER_PRE_PADDING + 2],
-			      0, LWS_WRITE_CLOSE);
+
+		/* if no prepared close reason, use 1000 and no aux data */
+		if (!wsi->u.ws.close_in_ping_buffer_len) {
+			wsi->u.ws.close_in_ping_buffer_len = 2;
+			wsi->u.ws.ping_payload_buf[LWS_PRE] =
+				(reason >> 16) & 0xff;
+			wsi->u.ws.ping_payload_buf[LWS_PRE + 1] =
+				reason & 0xff;
+		}
+
+		n = lws_write(wsi, &wsi->u.ws.ping_payload_buf[
+						LWS_PRE],
+			      wsi->u.ws.close_in_ping_buffer_len,
+			      LWS_WRITE_CLOSE);
 		if (n >= 0) {
 			/*
 			 * we have sent a nice protocol level indication we
@@ -208,7 +227,7 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 
 just_kill_connection:
 
-	lwsl_debug("close: just_kill_connection\n");
+	lwsl_debug("close: just_kill_connection: %p\n", wsi);
 
 	/*
 	 * we won't be servicing or receiving anything further from this guy
@@ -222,24 +241,48 @@ just_kill_connection:
 	wsi->state = LWSS_DEAD_SOCKET;
 
 	lws_free_set_NULL(wsi->rxflow_buffer);
-	lws_free_header_table(wsi);
 
 	if (old_state == LWSS_ESTABLISHED ||
 	    wsi->mode == LWSCM_WS_SERVING ||
 	    wsi->mode == LWSCM_WS_CLIENT) {
 
-		lws_free_set_NULL(wsi->u.ws.rx_user_buffer);
+		if (wsi->u.ws.rx_draining_ext) {
+			struct lws **w = &wsi->context->rx_draining_ext_list;
+
+			wsi->u.ws.rx_draining_ext = 0;
+			/* remove us from context draining ext list */
+			while (*w) {
+				if (*w == wsi) {
+					*w = wsi->u.ws.rx_draining_ext_list;
+					break;
+				}
+				w = &((*w)->u.ws.rx_draining_ext_list);
+			}
+			wsi->u.ws.rx_draining_ext_list = NULL;
+		}
+
+		if (wsi->u.ws.tx_draining_ext) {
+			struct lws **w = &wsi->context->tx_draining_ext_list;
+
+			wsi->u.ws.tx_draining_ext = 0;
+			/* remove us from context draining ext list */
+			while (*w) {
+				if (*w == wsi) {
+					*w = wsi->u.ws.tx_draining_ext_list;
+					break;
+				}
+				w = &((*w)->u.ws.tx_draining_ext_list);
+			}
+			wsi->u.ws.tx_draining_ext_list = NULL;
+		}
+		lws_free_set_NULL(wsi->u.ws.rx_ubuf);
 
 		if (wsi->trunc_alloc)
 			/* not going to be completed... nuke it */
 			lws_free_set_NULL(wsi->trunc_alloc);
 
-		if (wsi->u.ws.ping_payload_buf) {
-			lws_free_set_NULL(wsi->u.ws.ping_payload_buf);
-			wsi->u.ws.ping_payload_alloc = 0;
-			wsi->u.ws.ping_payload_len = 0;
-			wsi->u.ws.ping_pending_flag = 0;
-		}
+		wsi->u.ws.ping_payload_len = 0;
+		wsi->u.ws.ping_pending_flag = 0;
 	}
 
 	/* tell the user it's all over for this guy */
@@ -268,18 +311,14 @@ just_kill_connection:
 
 	/* deallocate any active extension contexts */
 
-	if (lws_ext_cb_wsi_active_exts(wsi, LWS_EXT_CALLBACK_DESTROY, NULL, 0) < 0)
+	if (lws_ext_cb_active(wsi, LWS_EXT_CB_DESTROY, NULL, 0) < 0)
 		lwsl_warn("extension destruction failed\n");
-#ifndef LWS_NO_EXTENSIONS
-	for (n = 0; n < wsi->count_active_extensions; n++)
-		lws_free(wsi->active_extensions_user[n]);
-#endif
 	/*
 	 * inform all extensions in case they tracked this guy out of band
 	 * even though not active on him specifically
 	 */
 	if (lws_ext_cb_all_exts(context, wsi,
-		       LWS_EXT_CALLBACK_DESTROY_ANY_WSI_CLOSING, NULL, 0) < 0)
+		       LWS_EXT_CB_DESTROY_ANY_WSI_CLOSING, NULL, 0) < 0)
 		lwsl_warn("ext destroy wsi failed\n");
 
 	if (!lws_ssl_close(wsi) && lws_socket_is_valid(wsi->sock)) {
@@ -641,7 +680,7 @@ lws_canonical_hostname(struct lws_context *context)
 	return (const char *)context->canonical_hostname;
 }
 
-int user_callback_handle_rxflow(callback_function callback_function,
+int user_callback_handle_rxflow(lws_callback_function callback_function,
 				struct lws *wsi,
 				enum lws_callback_reasons reason, void *user,
 				void *in, size_t len)
@@ -749,7 +788,9 @@ lws_get_protocol(struct lws *wsi)
 LWS_VISIBLE int
 lws_is_final_fragment(struct lws *wsi)
 {
-	return wsi->u.ws.final;
+	lwsl_info("%s: final %d, rx pk length %d, draining %d", __func__,
+			wsi->u.ws.final, wsi->u.ws.rx_packet_length, wsi->u.ws.rx_draining_ext);
+	return wsi->u.ws.final && !wsi->u.ws.rx_packet_length && !wsi->u.ws.rx_draining_ext;
 }
 
 LWS_VISIBLE unsigned char
@@ -916,6 +957,7 @@ lws_get_peer_write_allowance(struct lws *wsi)
 LWS_VISIBLE void
 lws_union_transition(struct lws *wsi, enum connection_mode mode)
 {
+	lwsl_debug("%s: %p: mode %d\n", __func__, wsi, mode);
 	memset(&wsi->u, 0, sizeof(wsi->u));
 	wsi->mode = mode;
 }
@@ -937,3 +979,138 @@ lws_wsi_user(struct lws *wsi)
 {
 	return wsi->user_space;
 }
+
+LWS_VISIBLE LWS_EXTERN void
+lws_close_reason(struct lws *wsi, enum lws_close_status status,
+		 unsigned char *buf, size_t len)
+{
+	unsigned char *p, *start;
+	int budget = sizeof(wsi->u.ws.ping_payload_buf) -
+		     LWS_PRE;
+
+	assert(wsi->mode == LWSCM_WS_SERVING || wsi->mode == LWSCM_WS_CLIENT);
+
+	start = p = &wsi->u.ws.ping_payload_buf[LWS_PRE];
+
+	*p++ = (((int)status) >> 8) & 0xff;
+	*p++ = ((int)status) & 0xff;
+
+	if (buf)
+		while (len-- && p < start + budget)
+			*p++ = *buf++;
+
+	wsi->u.ws.close_in_ping_buffer_len = p - start;
+}
+
+LWS_EXTERN int
+_lws_rx_flow_control(struct lws *wsi)
+{
+	/* there is no pending change */
+	if (!(wsi->rxflow_change_to & LWS_RXFLOW_PENDING_CHANGE)) {
+		lwsl_info("%s: no pending change\n", __func__);
+		return 0;
+	}
+
+	/* stuff is still buffered, not ready to really accept new input */
+	if (wsi->rxflow_buffer) {
+		/* get ourselves called back to deal with stashed buffer */
+		lws_callback_on_writable(wsi);
+		return 0;
+	}
+
+	/* pending is cleared, we can change rxflow state */
+
+	wsi->rxflow_change_to &= ~LWS_RXFLOW_PENDING_CHANGE;
+
+	lwsl_info("rxflow: wsi %p change_to %d\n", wsi,
+			      wsi->rxflow_change_to & LWS_RXFLOW_ALLOW);
+
+	/* adjust the pollfd for this wsi */
+
+	if (wsi->rxflow_change_to & LWS_RXFLOW_ALLOW) {
+		if (lws_change_pollfd(wsi, 0, LWS_POLLIN)) {
+			lwsl_info("%s: fail\n", __func__);
+			return -1;
+		}
+	} else
+		if (lws_change_pollfd(wsi, LWS_POLLIN, 0))
+			return -1;
+
+	return 0;
+}
+
+LWS_EXTERN int
+lws_check_utf8(unsigned char *state, unsigned char *buf, size_t len)
+{
+	static const unsigned char e0f4[] = {
+		0xa0 | ((2 - 1) << 2) | 1, /* e0 */
+		0x80 | ((4 - 1) << 2) | 1, /* e1 */
+		0x80 | ((4 - 1) << 2) | 1, /* e2 */
+		0x80 | ((4 - 1) << 2) | 1, /* e3 */
+		0x80 | ((4 - 1) << 2) | 1, /* e4 */
+		0x80 | ((4 - 1) << 2) | 1, /* e5 */
+		0x80 | ((4 - 1) << 2) | 1, /* e6 */
+		0x80 | ((4 - 1) << 2) | 1, /* e7 */
+		0x80 | ((4 - 1) << 2) | 1, /* e8 */
+		0x80 | ((4 - 1) << 2) | 1, /* e9 */
+		0x80 | ((4 - 1) << 2) | 1, /* ea */
+		0x80 | ((4 - 1) << 2) | 1, /* eb */
+		0x80 | ((4 - 1) << 2) | 1, /* ec */
+		0x80 | ((2 - 1) << 2) | 1, /* ed */
+		0x80 | ((4 - 1) << 2) | 1, /* ee */
+		0x80 | ((4 - 1) << 2) | 1, /* ef */
+		0x90 | ((3 - 1) << 2) | 2, /* f0 */
+		0x80 | ((4 - 1) << 2) | 2, /* f1 */
+		0x80 | ((4 - 1) << 2) | 2, /* f2 */
+		0x80 | ((4 - 1) << 2) | 2, /* f3 */
+		0x80 | ((1 - 1) << 2) | 2, /* f4 */
+
+		0,			   /* s0 */
+		0x80 | ((4 - 1) << 2) | 0, /* s2 */
+		0x80 | ((4 - 1) << 2) | 1, /* s3 */
+	};
+	unsigned char s = *state;
+
+	while (len--) {
+		unsigned char c = *buf++;
+
+		if (!s) {
+			if (c >= 0x80) {
+				if (c < 0xc2 || c > 0xf4)
+					return 1;
+				if (c < 0xe0)
+					s = 0x80 | ((4 - 1) << 2);
+				else
+					s = e0f4[c - 0xe0];
+			}
+		} else {
+			if (c < (s & 0xf0) ||
+			    c >= (s & 0xf0) + 0x10 + ((s << 2) & 0x30))
+				return 1;
+			s = e0f4[21 + (s & 3)];
+		}
+	}
+
+	*state = s;
+
+	return 0;
+}
+
+#ifdef LWS_NO_EXTENSIONS
+
+/* we need to provide dummy callbacks for internal exts
+ * so user code runs when faced with a lib compiled with
+ * extensions disabled.
+ */
+
+int
+lws_extension_callback_pm_deflate(struct lws_context *context,
+                                  const struct lws_extension *ext,
+                                  struct lws *wsi,
+                                  enum lws_extension_callback_reasons reason,
+                                  void *user, void *in, size_t len)
+{
+	return 0;
+}
+#endif
+

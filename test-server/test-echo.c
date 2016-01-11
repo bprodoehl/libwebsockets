@@ -4,7 +4,7 @@
  * This implements both the client and server sides.  It defaults to
  * serving, use --client <remote address> to connect as client.
  *
- * Copyright (C) 2010-2013 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010-2016 Andy Green <andy@warmcat.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -42,31 +42,52 @@
 
 static volatile int force_exit = 0;
 static int versa, state;
+static int times = -1;
 
-#define MAX_ECHO_PAYLOAD 1400
 #define LOCAL_RESOURCE_PATH INSTALL_DATADIR"/libwebsockets-test-server"
 
+#define MAX_ECHO_PAYLOAD 1024
+
 struct per_session_data__echo {
-	unsigned char buf[LWS_SEND_BUFFER_PRE_PADDING + MAX_ECHO_PAYLOAD + LWS_SEND_BUFFER_POST_PADDING];
+	size_t rx, tx;
+	unsigned char buf[LWS_PRE + MAX_ECHO_PAYLOAD];
 	unsigned int len;
 	unsigned int index;
+	int final;
+	int continuation;
+	int binary;
 };
 
 static int
 callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 	      void *in, size_t len)
 {
-	struct per_session_data__echo *pss = (struct per_session_data__echo *)user;
+	struct per_session_data__echo *pss =
+			(struct per_session_data__echo *)user;
 	int n;
 
 	switch (reason) {
 
 #ifndef LWS_NO_SERVER
-	/* when the callback is used for server operations --> */
 
 	case LWS_CALLBACK_SERVER_WRITEABLE:
 do_tx:
-		n = lws_write(wsi, &pss->buf[LWS_SEND_BUFFER_PRE_PADDING], pss->len, LWS_WRITE_TEXT);
+
+		n = LWS_WRITE_CONTINUATION;
+		if (!pss->continuation) {
+			if (pss->binary)
+				n = LWS_WRITE_BINARY;
+			else
+				n = LWS_WRITE_TEXT;
+			pss->continuation = 1;
+		}
+		if (!pss->final)
+			n |= LWS_WRITE_NO_FIN;
+		lwsl_info("+++ test-echo: writing %d, with final %d\n",
+			  pss->len, pss->final);
+
+		pss->tx += pss->len;
+		n = lws_write(wsi, &pss->buf[LWS_PRE], pss->len, n);
 		if (n < 0) {
 			lwsl_err("ERROR %d writing to socket, hanging up\n", n);
 			return 1;
@@ -75,16 +96,25 @@ do_tx:
 			lwsl_err("Partial write\n");
 			return -1;
 		}
+		pss->len = -1;
+		if (pss->final)
+			pss->continuation = 0;
+		lws_rx_flow_control(wsi, 1);
 		break;
 
 	case LWS_CALLBACK_RECEIVE:
 do_rx:
-		if (len > MAX_ECHO_PAYLOAD) {
-			lwsl_err("Server received packet bigger than %u, hanging up\n", MAX_ECHO_PAYLOAD);
-			return 1;
-		}
-		memcpy(&pss->buf[LWS_SEND_BUFFER_PRE_PADDING], in, len);
+		pss->final = lws_is_final_fragment(wsi);
+		pss->binary = lws_frame_is_binary(wsi);
+		lwsl_info("+++ test-echo: RX len %d final %d, pss->len=%d\n",
+			  len, pss->final, (int)pss->len);
+
+		memcpy(&pss->buf[LWS_PRE], in, len);
+		assert((int)pss->len == -1);
 		pss->len = (unsigned int)len;
+		pss->rx += len;
+
+		lws_rx_flow_control(wsi, 0);
 		lws_callback_on_writable(wsi);
 		break;
 #endif
@@ -94,13 +124,14 @@ do_rx:
 
 	case LWS_CALLBACK_CLOSED:
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-		lwsl_info("closed\n");
+		lwsl_debug("closed\n");
 		state = 0;
 		break;
 
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
-		lwsl_notice("Client has connected\n");
+		lwsl_debug("Client has connected\n");
 		pss->index = 0;
+		pss->len = -1;
 		state = 2;
 		break;
 
@@ -114,13 +145,18 @@ do_rx:
 
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 #ifndef LWS_NO_SERVER
-		if (versa)
-			goto do_tx;
+		if (versa) {
+			if (pss->len != (unsigned int)-1)
+				goto do_tx;
+			break;
+		}
 #endif
 		/* we will send our packet... */
-		pss->len = sprintf((char *)&pss->buf[LWS_SEND_BUFFER_PRE_PADDING], "hello from libwebsockets-test-echo client pid %d index %d\n", getpid(), pss->index++);
-		lwsl_notice("Client TX: %s", &pss->buf[LWS_SEND_BUFFER_PRE_PADDING]);
-		n = lws_write(wsi, &pss->buf[LWS_SEND_BUFFER_PRE_PADDING], pss->len, LWS_WRITE_TEXT);
+		pss->len = sprintf((char *)&pss->buf[LWS_PRE],
+				   "hello from libwebsockets-test-echo client pid %d index %d\n",
+				   getpid(), pss->index++);
+		lwsl_notice("Client TX: %s", &pss->buf[LWS_PRE]);
+		n = lws_write(wsi, &pss->buf[LWS_PRE], pss->len, LWS_WRITE_TEXT);
 		if (n < 0) {
 			lwsl_err("ERROR %d writing to socket, hanging up\n", n);
 			return -1;
@@ -130,10 +166,13 @@ do_rx:
 			return -1;
 		}
 		break;
-	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
-
-		break;
 #endif
+	case LWS_CALLBACK_CLIENT_CONFIRM_EXTENSION_SUPPORTED:
+		/* reject everything else except permessage-deflate */
+		if (strcmp(in, "permessage-deflate"))
+			return 1;
+		break;
+
 	default:
 		break;
 	}
@@ -147,14 +186,30 @@ static struct lws_protocols protocols[] = {
 	/* first protocol must always be HTTP handler */
 
 	{
-		"default",		/* name */
-		callback_echo,		/* callback */
-		sizeof(struct per_session_data__echo)	/* per_session_data_size */
+		"",		/* name - can be overriden with -e */
+		callback_echo,
+		sizeof(struct per_session_data__echo),	/* per_session_data_size */
+		MAX_ECHO_PAYLOAD,
 	},
 	{
 		NULL, NULL, 0		/* End of list */
 	}
 };
+
+static const struct lws_extension exts[] = {
+	{
+		"permessage-deflate",
+		lws_extension_callback_pm_deflate,
+		"permessage-deflate; client_no_context_takeover; client_max_window_bits"
+	},
+	{
+		"deflate-frame",
+		lws_extension_callback_pm_deflate,
+		"deflate_frame"
+	},
+	{ NULL, NULL, NULL /* terminator */ }
+};
+
 
 void sighandler(int sig)
 {
@@ -176,6 +231,8 @@ static struct option options[] = {
 	{ "uri",	required_argument,	NULL, 'u' },
 	{ "passphrase", required_argument,	NULL, 'P' },
 	{ "interface",  required_argument,	NULL, 'i' },
+	{ "times",	required_argument,	NULL, 'n' },
+	{ "echogen",	no_argument,		NULL, 'e' },
 #ifndef LWS_NO_DAEMONIZE
 	{ "daemonize", 	no_argument,		NULL, 'D' },
 #endif
@@ -208,6 +265,8 @@ int main(int argc, char **argv)
 	struct lws *wsi;
 	int disallow_selfsigned = 0;
 	struct timeval tv;
+	const char *connect_protocol = NULL;
+	struct lws_client_connect_info i;
 #endif
 
 	int debug_level = 7;
@@ -225,7 +284,7 @@ int main(int argc, char **argv)
 #endif
 
 	while (n >= 0) {
-		n = getopt_long(argc, argv, "i:hsp:d:DC:k:P:vu:"
+		n = getopt_long(argc, argv, "i:hsp:d:DC:k:P:vu:n:e"
 #ifndef LWS_NO_CLIENT
 			"c:r:"
 #endif
@@ -283,10 +342,18 @@ int main(int argc, char **argv)
 		case 'v':
 			versa = 1;
 			break;
+		case 'e':
+			protocols[0].name = "lws-echogen";
+			connect_protocol = protocols[0].name;
+			lwsl_err("using lws-echogen\n");
+			break;
 		case 'i':
 			strncpy(interface_name, optarg, sizeof interface_name);
 			interface_name[(sizeof interface_name) - 1] = '\0';
 			_interface = interface_name;
+			break;
+		case 'n':
+			times = atoi(optarg);
 			break;
 		case '?':
 		case 'h':
@@ -302,6 +369,8 @@ int main(int argc, char **argv)
 				"  --ssl        / -s\n"
 				"  --passphrase / -P <passphrase>\n"
 				"  --interface  / -i <interface>\n"
+				"  --uri        / -u <uri path>\n"
+				"  --times      / -n <-1 unlimited or times to echo>\n"
 #ifndef LWS_NO_DAEMONIZE
 				"  --daemonize  / -D\n"
 #endif
@@ -335,7 +404,7 @@ int main(int argc, char **argv)
 	lws_set_log_level(debug_level, lwsl_emit_syslog);
 
 	lwsl_notice("libwebsockets echo test - "
-		    "(C) Copyright 2010-2015 Andy Green <andy@warmcat.com> - "
+		    "(C) Copyright 2010-2016 Andy Green <andy@warmcat.com> - "
 		    "licensed under LGPL2.1\n");
 #ifndef LWS_NO_CLIENT
 	if (client) {
@@ -345,7 +414,8 @@ int main(int argc, char **argv)
 			lwsl_info("allowing selfsigned\n");
 			use_ssl = 2;
 		} else {
-			lwsl_info("requiring server cert validation againts %s\n", ssl_cert);
+			lwsl_info("requiring server cert validation against %s\n",
+				  ssl_cert);
 			info.ssl_ca_filepath = ssl_cert;
 		}
 	} else {
@@ -361,9 +431,6 @@ int main(int argc, char **argv)
 	info.port = listen_port;
 	info.iface = _interface;
 	info.protocols = protocols;
-#ifndef LWS_NO_EXTENSIONS
-	info.extensions = lws_get_internal_extensions();
-#endif
 	if (use_ssl && !client) {
 		info.ssl_cert_filepath = ssl_cert;
 		info.ssl_private_key_filepath = ssl_key;
@@ -374,7 +441,10 @@ int main(int argc, char **argv)
 		}
 	info.gid = -1;
 	info.uid = -1;
-	info.options = opts;
+	info.options = opts | LWS_SERVER_OPTION_VALIDATE_UTF8;
+#ifndef LWS_NO_EXTENSIONS
+	info.extensions = exts;
+#endif
 
 	context = lws_create_context(&info);
 	if (context == NULL) {
@@ -393,32 +463,51 @@ int main(int argc, char **argv)
 	n = 0;
 	while (n >= 0 && !force_exit) {
 #ifndef LWS_NO_CLIENT
-		if (client && !state) {
+		if (client && !state && times) {
 			state = 1;
-			lwsl_notice("Client connecting to %s:%u....\n", address, port);
+			lwsl_notice("Client connecting to %s:%u....\n",
+				    address, port);
 			/* we are in client mode */
 
 			address[sizeof(address) - 1] = '\0';
 			sprintf(ads_port, "%s:%u", address, port & 65535);
+			if (times > 0)
+				times--;
 
-			wsi = lws_client_connect(context, address,
-				port, use_ssl, uri, ads_port,
-				 ads_port, NULL, -1);
+			memset(&i, 0, sizeof(i));
+
+			i.context = context;
+			i.address = address;
+			i.port = port;
+			i.ssl_connection = use_ssl;
+			i.path = uri;
+			i.host = ads_port;
+			i.origin = ads_port;
+			i.protocol = connect_protocol;
+			i.client_exts = exts;
+
+			wsi = lws_client_connect_info(&i);
 			if (!wsi) {
-				lwsl_err("Client failed to connect to %s:%u\n", address, port);
+				lwsl_err("Client failed to connect to %s:%u\n",
+					 address, port);
 				goto bail;
 			}
 		}
 
-		if (client && !versa) {
+		if (client && !versa && times) {
 			gettimeofday(&tv, NULL);
 
 			if (((((unsigned long long)tv.tv_sec * 1000000) + tv.tv_usec) - oldus) > rate_us) {
 				lws_callback_on_writable_all_protocol(context,
 						&protocols[0]);
 				oldus = ((unsigned long long)tv.tv_sec * 1000000) + tv.tv_usec;
+				if (times > 0)
+					times--;
 			}
 		}
+
+		if (client && !state && !times)
+			break;
 #endif
 		n = lws_service(context, 10);
 	}
