@@ -71,4 +71,7 @@
 /* SSL server using ECDH certificate */
 #cmakedefine LWS_SSL_SERVER_WITH_ECDH_CERT
 
+/* Build with support for UNIX domain sockets */
+#cmakedefine LWS_USE_UNIX_DOMAIN_SOCKET
+
 ${LWS_SIZEOFPTR_CODE}

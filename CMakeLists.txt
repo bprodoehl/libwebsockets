@@ -75,7 +75,7 @@ option(LWS_IPV6 "Compile with support for ipv6" OFF)
 option(LWS_WITH_HTTP2 "Compile with support for http2" OFF)
 option(LWS_MBED3 "Platform is MBED3" OFF)
 option(LWS_SSL_SERVER_WITH_ECDH_CERT "Include SSL server use ECDH certificate" OFF)
-
+option(LWS_WITH_UNIX_DOMAIN_SOCKET "Compile with support for UNIX domain sockets" OFF)
 
 if (DEFINED YOTTA_WEBSOCKETS_VERSION_STRING)
 
@@ -199,6 +199,11 @@ set(LWS_OPENSSL_CLIENT_CERTS ../share CACHE PATH "Server SSL certificate directo
 if (WIN32)
 	set(LWS_OPENSSL_CLIENT_CERTS . CACHE PATH "Client SSL certificate directory")
 
+	if (LWS_UNIX_DOMAIN_SOCKET)
+		set(LWS_UNIX_DOMAIN_SOCKET OFF)
+		message(WARNING "UNIX domain sockets will not work on Windows!")
+	endif()
+
 	if (LWS_IPV6)
 		set(LWS_IPV6 OFF)
 		message(WARNING "IPv6 does not currently work on Windows!")
@@ -247,6 +252,10 @@ if (LWS_WITH_HTTP2)
 	set(LWS_USE_HTTP2 1)
 endif()
 
+if (LWS_WITH_UNIX_DOMAIN_SOCKET)
+	set(LWS_USE_UNIX_DOMAIN_SOCKET 1)
+endif()
+
 #if (LWS_MBED3)
 #	set(CMAKE_C_FLAGS "-D_DEBUG ${CMAKE_C_FLAGS}")
 #endif()
@@ -284,7 +293,7 @@ if (NOT LWS_HAVE_inline)
 endif()
 
 # Put the libaries and binaries that get built into directories at the
-# top of the build tree rather than in hard-to-find leaf directories. 
+# top of the build tree rather than in hard-to-find leaf directories.
 SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib")
 SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib")
@@ -817,8 +826,8 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 			# Set defines for this executable only.
 			set_property(
 				TARGET test-server-extpoll
-				PROPERTY COMPILE_DEFINITIONS 
-					EXTERNAL_POLL 
+				PROPERTY COMPILE_DEFINITIONS
+					EXTERNAL_POLL
 					INSTALL_DATADIR="${CMAKE_INSTALL_PREFIX}/share"
 				)
 
@@ -893,13 +902,13 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 				endif()
 			endif()
 
-			list(APPEND TEST_SERVER_DATA 
+			list(APPEND TEST_SERVER_DATA
 				"${TEST_SERVER_SSL_KEY}"
 				"${TEST_SERVER_SSL_CERT}")
 		endif()
 
 		add_custom_command(TARGET test-server
-						POST_BUILD 
+						POST_BUILD
 						COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:test-server>/../share/libwebsockets-test-server")
 
 		# Copy the file needed to run the server so that the test apps can
@@ -907,7 +916,7 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 		foreach (TEST_FILE ${TEST_SERVER_DATA})
 			if (EXISTS ${TEST_FILE})
 				add_custom_command(TARGET test-server
-							POST_BUILD 
+							POST_BUILD
 							COMMAND "${CMAKE_COMMAND}" -E copy "${TEST_FILE}" "$<TARGET_FILE_DIR:test-server>/../share/libwebsockets-test-server" VERBATIM)
 			endif()
 		endforeach()
@@ -1020,35 +1029,35 @@ export(TARGETS ${LWS_LIBRARIES}
 export(PACKAGE libwebsockets)
 
 # Generate the config file for the build-tree.
-set(LWS__INCLUDE_DIRS 
+set(LWS__INCLUDE_DIRS
     "${PROJECT_SOURCE_DIR}/lib"
     "${PROJECT_BINARY_DIR}")
 set(LIBWEBSOCKETS_INCLUDE_DIRS ${LWS__INCLUDE_DIRS} CACHE PATH "Libwebsockets include directories")
 configure_file(${PROJECT_SOURCE_DIR}/cmake/LibwebsocketsConfig.cmake.in
-                ${PROJECT_BINARY_DIR}/LibwebsocketsConfig.cmake 
+                ${PROJECT_BINARY_DIR}/LibwebsocketsConfig.cmake
                 @ONLY)
 
 # Generate the config file for the installation tree.
 get_filename_component(LWS_ABSOLUTE_INSTALL_CMAKE_DIR ${LWS_INSTALL_CMAKE_DIR} ABSOLUTE)
 get_filename_component(LWS_ABSOLUTE_INSTALL_INCLUDE_DIR ${LWS_INSTALL_INCLUDE_DIR} ABSOLUTE)
-file(RELATIVE_PATH 
-    REL_INCLUDE_DIR 
+file(RELATIVE_PATH
+    REL_INCLUDE_DIR
     "${LWS_ABSOLUTE_INSTALL_CMAKE_DIR}"
     "${LWS_ABSOLUTE_INSTALL_INCLUDE_DIR}") # Calculate the relative directory from the cmake dir.
 
-# Note the EVENT_CMAKE_DIR is defined in JanssonConfig.cmake.in, 
+# Note the EVENT_CMAKE_DIR is defined in JanssonConfig.cmake.in,
 # we escape it here so it's evaluated when it is included instead
-# so that the include dirs are given relative to where the 
+# so that the include dirs are given relative to where the
 # config file is located.
-set(LWS__INCLUDE_DIRS 
-    "\${LWS_CMAKE_DIR}/${REL_INCLUDE_DIR}") 
+set(LWS__INCLUDE_DIRS
+    "\${LWS_CMAKE_DIR}/${REL_INCLUDE_DIR}")
 configure_file(${PROJECT_SOURCE_DIR}/cmake/LibwebsocketsConfig.cmake.in
-                ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/LibwebsocketsConfig.cmake 
+                ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/LibwebsocketsConfig.cmake
                 @ONLY)
 
 # Generate version info for both build-tree and install-tree.
 configure_file(${PROJECT_SOURCE_DIR}/cmake/LibwebsocketsConfigVersion.cmake.in
-                ${PROJECT_BINARY_DIR}/LibwebsocketsConfigVersion.cmake 
+                ${PROJECT_BINARY_DIR}/LibwebsocketsConfigVersion.cmake
                 @ONLY)
 
 			set_target_properties(${LWS_LIBRARIES}
@@ -1132,6 +1141,7 @@ message(" LWS_IPV6 = ${LWS_IPV6}")
 message(" LWS_WITH_HTTP2 = ${LWS_WITH_HTTP2}")
 message(" LWS_MBED3 = ${LWS_MBED3}")
 message(" LWS_SSL_SERVER_WITH_ECDH_CERT = ${LWS_SSL_SERVER_WITH_ECDH_CERT}")
+message(" LWS_WITH_UNIX_DOMAIN_SOCKET = ${LWS_WITH_UNIX_DOMAIN_SOCKET}")
 message("---------------------------------------------------------------------")
 
 # These will be available to parent projects including libwebsockets using add_subdirectory()

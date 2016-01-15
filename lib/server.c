@@ -30,6 +30,9 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 #endif
 #if LWS_POSIX
 	struct sockaddr_in serv_addr4;
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
+	struct sockaddr_un serv_unix;
+#endif
 	socklen_t len = sizeof(struct sockaddr);
 	struct sockaddr_in sin;
 	struct sockaddr *v;
@@ -47,6 +50,11 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 #ifdef LWS_USE_IPV6
 	if (LWS_IPV6_ENABLED(context))
 		sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+	else
+#endif
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
+	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context))
+		sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	else
 #endif
 		sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -81,6 +89,48 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 		serv_addr6.sin6_addr = in6addr_any;
 		serv_addr6.sin6_family = AF_INET6;
 		serv_addr6.sin6_port = htons(info->port);
+	} else
+#endif
+#ifdef LWS_USE_UNIX_DOMAIN_SOCKET
+	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context)) {
+		struct stat st;
+		v = (struct sockaddr *)&serv_unix;
+		n = sizeof(struct sockaddr_un);
+		bzero((char *) &serv_unix, sizeof(serv_unix));
+		serv_unix.sun_family = AF_UNIX;
+		strcpy(serv_unix.sun_path, info->iface);
+		lwsl_notice("UNIX Domain Socket has name %s\n", serv_unix.sun_path);
+
+		int status = stat(serv_unix.sun_path, &st);
+		if (status == 0) {
+			/* A file already exists. Check if this file is a socket node.
+			 *   * If yes: unlink it.
+			 *   * If no: treat it as an error condition.
+			 */
+			if ((st.st_mode & S_IFMT) == S_IFSOCK) {
+				status = unlink(serv_unix.sun_path);
+				if (status != 0) {
+					perror ("Error unlinking the socket node");
+					exit (1);
+				}
+			} else {
+				/* We won't unlink to create a socket in place of who-know-what.
+				 * Note: don't use `perror` here, as `status == 0` (this is an
+				 * error we've defined, not an error returned by a system-call).
+				 */
+				lwsl_err("The path already exists and is not a socket node.");
+				compatible_close(sockfd);
+				return 1;
+			}
+		} else {
+			if (errno == ENOENT) {
+				/* No file of the same path: do nothing. */
+			} else {
+				lwsl_err("Error stat()ing the socket node path");
+				compatible_close(sockfd);
+				return 1;
+			}
+		}
 	} else
 #endif
 	{
@@ -135,6 +185,11 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 	listen(sockfd, LWS_SOMAXCONN);
 #else
 	mbed3_tcp_stream_bind(sockfd, info->port, wsi);
+#endif
+#if LWS_POSIX && defined(LWS_USE_UNIX_DOMAIN_SOCKET)
+	if (LWS_UNIX_DOMAIN_SOCKET_ENABLED(context))
+		lwsl_notice(" Listening on UNIX domain socket %s\n", info->iface);
+	else
 #endif
 	lwsl_notice(" Listening on port %d\n", info->port);
 
