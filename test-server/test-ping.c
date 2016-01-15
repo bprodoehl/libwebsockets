@@ -39,6 +39,10 @@
 #include "gettimeofday.h"
 #endif
 
+#ifdef __ANDROID__
+#include <termiosh>
+#endif
+
 /*
  * this is specified in the 04 standard, control frames can only have small
  * payload length styles
@@ -53,8 +57,7 @@ static unsigned int interval_us = 1000000;
 static unsigned int size = 64;
 static int flood;
 static const char *address;
-static unsigned char pingbuf[LWS_SEND_BUFFER_PRE_PADDING + MAX_MIRROR_PAYLOAD +
-			     LWS_SEND_BUFFER_POST_PADDING];
+static unsigned char pingbuf[LWS_PRE + MAX_MIRROR_PAYLOAD];
 static char peer_name[128];
 static unsigned long started;
 static int screen_width = 80;
@@ -217,23 +220,23 @@ callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 
 		shift = 56;
-		p = &pingbuf[LWS_SEND_BUFFER_PRE_PADDING];
+		p = &pingbuf[LWS_PRE];
 
 		/* 64-bit ping index in network byte order */
 
 		while (shift >= 0) {
-			*p++ = psd->ping_index >> shift;
+			*p++ = (unsigned char)(psd->ping_index >> shift);
 			shift -= 8;
 		}
 
-		while (p - &pingbuf[LWS_SEND_BUFFER_PRE_PADDING] < size)
+		while ((unsigned int)(p - &pingbuf[LWS_PRE]) < size)
 			*p++ = 0;
 
 		gettimeofday(&tv, NULL);
 
 		psd->ringbuffer[psd->ringbuffer_head].issue_timestamp =
 					     (tv.tv_sec * 1000000) + tv.tv_usec;
-		psd->ringbuffer[psd->ringbuffer_head].index = psd->ping_index++;
+		psd->ringbuffer[psd->ringbuffer_head].index = (unsigned long)psd->ping_index++;
 		psd->ringbuffer[psd->ringbuffer_head].seen = 0;
 
 		if (psd->ringbuffer_head == PING_RINGBUFFER_SIZE - 1)
@@ -254,16 +257,16 @@ callback_lws_mirror(struct lws *wsi, enum lws_callback_reasons reason,
 
 		if (use_mirror)
 			n = lws_write(wsi,
-				&pingbuf[LWS_SEND_BUFFER_PRE_PADDING],
+				&pingbuf[LWS_PRE],
 					size, write_options | LWS_WRITE_BINARY);
 		else
 			n = lws_write(wsi,
-				&pingbuf[LWS_SEND_BUFFER_PRE_PADDING],
+				&pingbuf[LWS_PRE],
 					size, write_options | LWS_WRITE_PING);
 
 		if (n < 0)
 			return -1;
-		if (n < size) {
+		if (n < (int)size) {
 			lwsl_err("Partial write\n");
 			return -1;
 		}
@@ -371,7 +374,7 @@ int main(int argc, char **argv)
 			protocols[PROTOCOL_LWS_MIRROR].name = protocol_name;
 			break;
 		case 'i':
-			interval_us = 1000000.0 * atof(optarg);
+			interval_us = (unsigned int)(1000000.0 * atof(optarg));
 			break;
 		case 's':
 			size = atoi(optarg);

@@ -60,13 +60,47 @@ int lextable_decode(int pos, char c)
 
 int lws_allocate_header_table(struct lws *wsi)
 {
-	/* Be sure to free any existing header data to avoid mem leak: */
-	lws_free_header_table(wsi);
-	wsi->u.hdr.ah = lws_malloc(sizeof(*wsi->u.hdr.ah));
-	if (wsi->u.hdr.ah == NULL) {
-		lwsl_err("Out of memory\n");
+	struct lws_context *context = wsi->context;
+	int n;
+
+	lwsl_debug("%s: wsi %p: ah %p\n", __func__, (void *)wsi,
+		 (void *)wsi->u.hdr.ah);
+
+	/* if we are already bound to one, just clear it down */
+	if (wsi->u.hdr.ah)
+		goto reset;
+	/*
+	 * server should have suppressed the accept of a new wsi before this
+	 * became the case.  If initiating multiple client connects, make sure
+	 * the ah pool is big enough to cope, or be prepared to retry
+	 */
+	if (context->ah_count_in_use == context->max_http_header_pool) {
+		lwsl_err("No free ah\n");
 		return -1;
 	}
+
+	for (n = 0; n < context->max_http_header_pool; n++)
+		if (!context->ah_pool[n].in_use)
+			break;
+
+	/* if the count of in use said something free... */
+	assert(n != context->max_http_header_pool);
+
+	wsi->u.hdr.ah = &context->ah_pool[n];
+	wsi->u.hdr.ah->in_use = 1;
+
+	context->ah_count_in_use++;
+	/* if we used up all the ah, defeat accepting new server connections */
+	if (context->ah_count_in_use == context->max_http_header_pool)
+		if (_lws_server_listen_accept_flow_control(context, 0))
+			return 1;
+
+	lwsl_debug("%s: wsi %p: ah %p: count %d (on exit)\n",
+		 __func__, (void *)wsi, (void *)wsi->u.hdr.ah,
+		 context->ah_count_in_use);
+
+reset:
+	/* init the ah to reflect no headers or data have appeared yet */
 	memset(wsi->u.hdr.ah->frag_index, 0, sizeof(wsi->u.hdr.ah->frag_index));
 	wsi->u.hdr.ah->nfrag = 0;
 	wsi->u.hdr.ah->pos = 0;
@@ -76,10 +110,67 @@ int lws_allocate_header_table(struct lws *wsi)
 
 int lws_free_header_table(struct lws *wsi)
 {
-	lws_free_set_NULL(wsi->u.hdr.ah);
+	struct lws_context *context = wsi->context;
+
+	lwsl_debug("%s: wsi %p: ah %p (count = %d)\n", __func__, (void *)wsi,
+		 (void *)wsi->u.hdr.ah, context->ah_count_in_use);
+
+	assert(wsi->u.hdr.ah);
+	if (!wsi->u.hdr.ah)
+		return 0;
+
+	/* if we think we're freeing one, there should be one to free */
+	assert(context->ah_count_in_use > 0);
+
+	assert(wsi->u.hdr.ah->in_use);
+	wsi->u.hdr.ah->in_use = 0;
+
+	/* if we just freed up one ah, allow new server connection */
+	if (context->ah_count_in_use == context->max_http_header_pool)
+		if (_lws_server_listen_accept_flow_control(context, 1))
+			return 1;
+
+	context->ah_count_in_use--;
 	wsi->u.hdr.ah = NULL;
+
 	return 0;
-};
+}
+
+/**
+ * lws_hdr_fragment_length: report length of a single fragment of a header
+ *		The returned length does not include the space for a
+ *		terminating '\0'
+ *
+ * @wsi: websocket connection
+ * @h: which header index we are interested in
+ * @frag_idx: which fragment of @h we want to get the length of
+ */
+
+LWS_VISIBLE int
+lws_hdr_fragment_length(struct lws *wsi, enum lws_token_indexes h, int frag_idx)
+{
+	int n;
+
+	n = wsi->u.hdr.ah->frag_index[h];
+	if (!n)
+		return 0;
+	do {
+		if (!frag_idx)
+			return wsi->u.hdr.ah->frags[n].len;
+		n = wsi->u.hdr.ah->frags[n].nfrag;
+	} while (frag_idx-- && n);
+
+	return 0;
+}
+
+/**
+ * lws_hdr_total_length: report length of all fragments of a header totalled up
+ *		The returned length does not include the space for a
+ *		terminating '\0'
+ *
+ * @wsi: websocket connection
+ * @h: which header index we are interested in
+ */
 
 LWS_VISIBLE int lws_hdr_total_length(struct lws *wsi, enum lws_token_indexes h)
 {
@@ -97,6 +188,20 @@ LWS_VISIBLE int lws_hdr_total_length(struct lws *wsi, enum lws_token_indexes h)
 	return len;
 }
 
+/**
+ * lws_hdr_copy_fragment: copy a single fragment of the given header to a buffer
+ *		The buffer length @len must include space for an additional
+ *		terminating '\0', or it will fail returning -1.
+ *		If the requested fragment index is not present, it fails
+ *		returning -1.
+ *
+ * @wsi: websocket connection
+ * @dst: destination buffer
+ * @len: length of destination buffer
+ * @h: which header index we are interested in
+ * @frag_index: which fragment of @h we want to copy
+ */
+
 LWS_VISIBLE int lws_hdr_copy_fragment(struct lws *wsi, char *dst, int len,
 				      enum lws_token_indexes h, int frag_idx)
 {
@@ -110,15 +215,26 @@ LWS_VISIBLE int lws_hdr_copy_fragment(struct lws *wsi, char *dst, int len,
 		n++;
 	}
 
-	if (wsi->u.hdr.ah->frags[f].len >= (len - 1))
+	if (wsi->u.hdr.ah->frags[f].len >= len)
 		return -1;
 
-	memcpy(dst, &wsi->u.hdr.ah->data[wsi->u.hdr.ah->frags[f].offset],
+	memcpy(dst, wsi->u.hdr.ah->data + wsi->u.hdr.ah->frags[f].offset,
 	       wsi->u.hdr.ah->frags[f].len);
 	dst[wsi->u.hdr.ah->frags[f].len] = '\0';
 
 	return wsi->u.hdr.ah->frags[f].len;
 }
+
+/**
+ * lws_hdr_copy: copy a single fragment of the given header to a buffer
+ *		The buffer length @len must include space for an additional
+ *		terminating '\0', or it will fail returning -1.
+ *
+ * @wsi: websocket connection
+ * @dst: destination buffer
+ * @len: length of destination buffer
+ * @h: which header index we are interested in
+ */
 
 LWS_VISIBLE int lws_hdr_copy(struct lws *wsi, char *dst, int len,
 			     enum lws_token_indexes h)
@@ -150,7 +266,7 @@ char *lws_hdr_simple_ptr(struct lws *wsi, enum lws_token_indexes h)
 	if (!n)
 		return NULL;
 
-	return &wsi->u.hdr.ah->data[wsi->u.hdr.ah->frags[n].offset];
+	return wsi->u.hdr.ah->data + wsi->u.hdr.ah->frags[n].offset;
 }
 
 int lws_hdr_simple_create(struct lws *wsi, enum lws_token_indexes h,
@@ -169,7 +285,7 @@ int lws_hdr_simple_create(struct lws *wsi, enum lws_token_indexes h,
 	wsi->u.hdr.ah->frags[wsi->u.hdr.ah->nfrag].nfrag = 0;
 
 	do {
-		if (wsi->u.hdr.ah->pos == sizeof(wsi->u.hdr.ah->data)) {
+		if (wsi->u.hdr.ah->pos == wsi->context->max_http_header_data) {
 			lwsl_err("Ran out of header data space\n");
 			return -1;
 		}
@@ -199,7 +315,7 @@ static int issue_char(struct lws *wsi, unsigned char c)
 {
 	unsigned short frag_len;
 
-	if (wsi->u.hdr.ah->pos == sizeof(wsi->u.hdr.ah->data)) {
+	if (wsi->u.hdr.ah->pos == wsi->context->max_http_header_data) {
 		lwsl_warn("excessive header content\n");
 		return -1;
 	}
@@ -219,8 +335,8 @@ static int issue_char(struct lws *wsi, unsigned char c)
 	/* Insert a null character when we *hit* the limit: */
 	if (frag_len == wsi->u.hdr.current_token_limit) {
 		wsi->u.hdr.ah->data[wsi->u.hdr.ah->pos++] = '\0';
-		lwsl_warn("header %i exceeds limit\n",
-			  wsi->u.hdr.parser_state);
+		lwsl_warn("header %i exceeds limit %d\n",
+			  wsi->u.hdr.parser_state, wsi->u.hdr.current_token_limit);
 	}
 
 	return 1;
@@ -324,7 +440,7 @@ int lws_parse(struct lws *wsi, unsigned char c)
 		switch (wsi->u.hdr.ups) {
 		case URIPS_IDLE:
 			/* genuine delimiter */
-			if (c == '&' && !enc) {
+			if ((c == '&' || c == ';') && !enc) {
 				issue_char(wsi, c);
 				/* swallow the terminator */
 				ah->frags[ah->nfrag].len--;
@@ -334,11 +450,23 @@ int lws_parse(struct lws *wsi, unsigned char c)
 				if (ah->nfrag >= ARRAY_SIZE(ah->frags))
 					goto excessive;
 				/* start next fragment after the & */
+				wsi->u.hdr.post_literal_equal = 0;
 				ah->frags[ah->nfrag].offset = ah->pos;
 				ah->frags[ah->nfrag].len = 0;
 				ah->frags[ah->nfrag].nfrag = 0;
 				goto swallow;
 			}
+			/* uriencoded = in the name part, disallow */
+			if (c == '=' && enc && !wsi->u.hdr.post_literal_equal)
+				c = '_';
+
+			/* after the real =, we don't care how many = */
+			if (c == '=' && !enc)
+				wsi->u.hdr.post_literal_equal = 1;
+
+			/* + to space */
+			if (c == '+' && !enc)
+				c = ' ';
 			/* issue the first / always */
 			if (c == '/' && !ah->frag_index[WSI_TOKEN_HTTP_URI_ARGS])
 				wsi->u.hdr.ups = URIPS_SEEN_SLASH;
@@ -410,6 +538,7 @@ int lws_parse(struct lws *wsi, unsigned char c)
 			ah->frags[ah->nfrag].len = 0;
 			ah->frags[ah->nfrag].nfrag = 0;
 
+			wsi->u.hdr.post_literal_equal = 0;
 			ah->frag_index[WSI_TOKEN_HTTP_URI_ARGS] = ah->nfrag;
 			wsi->u.hdr.ups = URIPS_IDLE;
 			goto swallow;
@@ -508,7 +637,8 @@ swallow:
 					context->token_limits->token_limit[
 						       wsi->u.hdr.parser_state];
 			else
-				wsi->u.hdr.current_token_limit = sizeof(ah->data);
+				wsi->u.hdr.current_token_limit =
+					wsi->context->max_http_header_data;
 
 			if (wsi->u.hdr.parser_state == WSI_TOKEN_CHALLENGE)
 				goto set_parsing_complete;
@@ -539,7 +669,7 @@ excessive:
 				n = ah->frags[n].nfrag;
 		ah->frags[n].nfrag = ah->nfrag;
 
-		if (ah->pos == sizeof(ah->data)) {
+		if (ah->pos == wsi->context->max_http_header_data) {
 			lwsl_warn("excessive header content\n");
 			return -1;
 		}
@@ -608,12 +738,33 @@ int
 lws_rx_sm(struct lws *wsi, unsigned char c)
 {
 	struct lws_tokens eff_buf;
-	int ret = 0;
+	int ret = 0, n, rx_draining_ext = 0;
 	int callback_action = LWS_CALLBACK_RECEIVE;
+	if (wsi->socket_is_permanently_unusable)
+		return -1;
 
 	switch (wsi->lws_rx_parse_state) {
 	case LWS_RXPS_NEW:
+		if (wsi->u.ws.rx_draining_ext) {
+			struct lws **w = &wsi->context->rx_draining_ext_list;
 
+			eff_buf.token = NULL;
+			eff_buf.token_len = 0;
+			wsi->u.ws.rx_draining_ext = 0;
+			/* remove us from context draining ext list */
+			while (*w) {
+				if (*w == wsi) {
+					*w = wsi->u.ws.rx_draining_ext_list;
+					break;
+				}
+				w = &((*w)->u.ws.rx_draining_ext_list);
+			}
+			wsi->u.ws.rx_draining_ext_list = NULL;
+			rx_draining_ext = 1;
+			lwsl_err("%s: doing draining flow\n", __func__);
+
+			goto drain_extension;
+		}
 		switch (wsi->ietf_spec_revision) {
 		case 13:
 			/*
@@ -628,20 +779,20 @@ lws_rx_sm(struct lws *wsi, unsigned char c)
 			break;
 		}
 		break;
-	case LWS_RXPS_04_MASK_NONCE_1:
-		wsi->u.ws.mask_nonce[1] = c;
+	case LWS_RXPS_04_mask_1:
+		wsi->u.ws.mask[1] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
-		wsi->lws_rx_parse_state = LWS_RXPS_04_MASK_NONCE_2;
+		wsi->lws_rx_parse_state = LWS_RXPS_04_mask_2;
 		break;
-	case LWS_RXPS_04_MASK_NONCE_2:
-		wsi->u.ws.mask_nonce[2] = c;
+	case LWS_RXPS_04_mask_2:
+		wsi->u.ws.mask[2] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
-		wsi->lws_rx_parse_state = LWS_RXPS_04_MASK_NONCE_3;
+		wsi->lws_rx_parse_state = LWS_RXPS_04_mask_3;
 		break;
-	case LWS_RXPS_04_MASK_NONCE_3:
-		wsi->u.ws.mask_nonce[3] = c;
+	case LWS_RXPS_04_mask_3:
+		wsi->u.ws.mask[3] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 
@@ -650,7 +801,7 @@ lws_rx_sm(struct lws *wsi, unsigned char c)
 		 * this is the start of a frame with a new key
 		 */
 
-		wsi->u.ws.frame_mask_index = 0;
+		wsi->u.ws.mask_idx = 0;
 
 		wsi->lws_rx_parse_state = LWS_RXPS_04_FRAME_HDR_1;
 		break;
@@ -695,9 +846,22 @@ handle_first:
 		switch (wsi->u.ws.opcode) {
 		case LWSWSOPC_TEXT_FRAME:
 		case LWSWSOPC_BINARY_FRAME:
+			wsi->u.ws.rsv_first_msg = (c & 0x70);
 			wsi->u.ws.frame_is_binary =
 			     wsi->u.ws.opcode == LWSWSOPC_BINARY_FRAME;
 			break;
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+		case 0xb:
+		case 0xc:
+		case 0xd:
+		case 0xe:
+		case 0xf:
+			lwsl_info("illegal opcode\n");
+			return -1;
 		}
 		wsi->lws_rx_parse_state = LWS_RXPS_04_FRAME_HDR_LEN;
 		break;
@@ -814,33 +978,33 @@ handle_first:
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_1:
-		wsi->u.ws.mask_nonce[0] = c;
+		wsi->u.ws.mask[0] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_2;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_2:
-		wsi->u.ws.mask_nonce[1] = c;
+		wsi->u.ws.mask[1] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_3;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_3:
-		wsi->u.ws.mask_nonce[2] = c;
+		wsi->u.ws.mask[2] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state = LWS_RXPS_07_COLLECT_FRAME_KEY_4;
 		break;
 
 	case LWS_RXPS_07_COLLECT_FRAME_KEY_4:
-		wsi->u.ws.mask_nonce[3] = c;
+		wsi->u.ws.mask[3] = c;
 		if (c)
 			wsi->u.ws.all_zero_nonce = 0;
 		wsi->lws_rx_parse_state =
 					LWS_RXPS_PAYLOAD_UNTIL_LENGTH_EXHAUSTED;
-		wsi->u.ws.frame_mask_index = 0;
+		wsi->u.ws.mask_idx = 0;
 		if (wsi->u.ws.rx_packet_length == 0) {
 			wsi->lws_rx_parse_state = LWS_RXPS_NEW;
 			goto spill;
@@ -850,19 +1014,20 @@ handle_first:
 
 	case LWS_RXPS_PAYLOAD_UNTIL_LENGTH_EXHAUSTED:
 
-		if (!wsi->u.ws.rx_user_buffer) {
-			lwsl_err("NULL user buffer...\n");
-			return 1;
-		}
+		assert(wsi->u.ws.rx_ubuf);
 
+               if (wsi->u.ws.rx_ubuf_head + LWS_PRE + 4 >= wsi->u.ws.rx_ubuf_alloc) {
+                       lwsl_err("Attempted overflow\n");
+                       return -1;
+               }
 		if (wsi->u.ws.all_zero_nonce)
-			wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING +
-			       (wsi->u.ws.rx_user_buffer_head++)] = c;
+			wsi->u.ws.rx_ubuf[LWS_PRE +
+			       (wsi->u.ws.rx_ubuf_head++)] = c;
 		else
-			wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING +
-			       (wsi->u.ws.rx_user_buffer_head++)] =
-				   c ^ wsi->u.ws.mask_nonce[
-					    (wsi->u.ws.frame_mask_index++) & 3];
+			wsi->u.ws.rx_ubuf[LWS_PRE +
+			       (wsi->u.ws.rx_ubuf_head++)] =
+				   c ^ wsi->u.ws.mask[
+					    (wsi->u.ws.mask_idx++) & 3];
 
 		if (--wsi->u.ws.rx_packet_length == 0) {
 			/* spill because we have the whole frame */
@@ -876,12 +1041,12 @@ handle_first:
 		 */
 
 		if (!wsi->protocol->rx_buffer_size &&
-			 		wsi->u.ws.rx_user_buffer_head !=
+			 		wsi->u.ws.rx_ubuf_head !=
 			 				  LWS_MAX_SOCKET_IO_BUF)
 			break;
 		else
 			if (wsi->protocol->rx_buffer_size &&
-					wsi->u.ws.rx_user_buffer_head !=
+					wsi->u.ws.rx_ubuf_head !=
 						  wsi->protocol->rx_buffer_size)
 			break;
 
@@ -896,6 +1061,7 @@ spill:
 
 		switch (wsi->u.ws.opcode) {
 		case LWSWSOPC_CLOSE:
+
 			/* is this an acknowledgement of our close? */
 			if (wsi->state == LWSS_AWAITING_CLOSE_ACK) {
 				/*
@@ -909,6 +1075,15 @@ spill:
 				/* if he sends us 2 CLOSE, kill him */
 				return -1;
 
+			if (user_callback_handle_rxflow(
+					wsi->protocol->callback, wsi,
+					LWS_CALLBACK_WS_PEER_INITIATED_CLOSE,
+					wsi->user_space,
+					&wsi->u.ws.rx_ubuf[
+						LWS_PRE],
+					wsi->u.ws.rx_ubuf_head))
+				return -1;
+
 			lwsl_parser("server sees client close packet\n");
 			wsi->state = LWSS_RETURNED_CLOSE_ALREADY;
 			/* deal with the close packet contents as a PONG */
@@ -917,7 +1092,7 @@ spill:
 
 		case LWSWSOPC_PING:
 			lwsl_info("received %d byte ping, sending pong\n",
-						 wsi->u.ws.rx_user_buffer_head);
+						 wsi->u.ws.rx_ubuf_head);
 
 			if (wsi->u.ws.ping_pending_flag) {
 				/*
@@ -929,42 +1104,29 @@ spill:
 			}
 process_as_ping:
 			/* control packets can only be < 128 bytes long */
-			if (wsi->u.ws.rx_user_buffer_head > 128 - 4) {
+			if (wsi->u.ws.rx_ubuf_head > 128 - 3) {
 				lwsl_parser("DROP PING payload too large\n");
 				goto ping_drop;
 			}
 
-			/* if existing buffer is too small, drop it */
-			if (wsi->u.ws.ping_payload_buf &&
-			    wsi->u.ws.ping_payload_alloc < wsi->u.ws.rx_user_buffer_head) {
-				lws_free_set_NULL(wsi->u.ws.ping_payload_buf);
-			}
-
-			/* if no buffer, allocate it */
-			if (!wsi->u.ws.ping_payload_buf) {
-				wsi->u.ws.ping_payload_buf = lws_malloc(wsi->u.ws.rx_user_buffer_head
-									+ LWS_SEND_BUFFER_PRE_PADDING);
-				wsi->u.ws.ping_payload_alloc = wsi->u.ws.rx_user_buffer_head;
-			}
-
 			/* stash the pong payload */
-			memcpy(wsi->u.ws.ping_payload_buf + LWS_SEND_BUFFER_PRE_PADDING,
-			       &wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING],
-				wsi->u.ws.rx_user_buffer_head);
+			memcpy(wsi->u.ws.ping_payload_buf + LWS_PRE,
+			       &wsi->u.ws.rx_ubuf[LWS_PRE],
+				wsi->u.ws.rx_ubuf_head);
 
-			wsi->u.ws.ping_payload_len = wsi->u.ws.rx_user_buffer_head;
+			wsi->u.ws.ping_payload_len = wsi->u.ws.rx_ubuf_head;
 			wsi->u.ws.ping_pending_flag = 1;
 
 			/* get it sent as soon as possible */
 			lws_callback_on_writable(wsi);
 ping_drop:
-			wsi->u.ws.rx_user_buffer_head = 0;
+			wsi->u.ws.rx_ubuf_head = 0;
 			return 0;
 
 		case LWSWSOPC_PONG:
 			lwsl_info("received pong\n");
-			lwsl_hexdump(&wsi->u.ws.rx_user_buffer[LWS_SEND_BUFFER_PRE_PADDING],
-			             wsi->u.ws.rx_user_buffer_head);
+			lwsl_hexdump(&wsi->u.ws.rx_ubuf[LWS_PRE],
+			             wsi->u.ws.rx_ubuf_head);
 
 			/* issue it */
 			callback_action = LWS_CALLBACK_RECEIVE_PONG;
@@ -984,17 +1146,15 @@ ping_drop:
 			 * state machine.
 			 */
 
-			eff_buf.token = &wsi->u.ws.rx_user_buffer[
-						   LWS_SEND_BUFFER_PRE_PADDING];
-			eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
+			eff_buf.token = &wsi->u.ws.rx_ubuf[LWS_PRE];
+			eff_buf.token_len = wsi->u.ws.rx_ubuf_head;
 
-			if (lws_ext_cb_wsi_active_exts(wsi,
-				LWS_EXT_CALLBACK_EXTENDED_PAYLOAD_RX,
+			if (lws_ext_cb_active(wsi, LWS_EXT_CB_EXTENDED_PAYLOAD_RX,
 					&eff_buf, 0) <= 0) /* not handle or fail */
 				lwsl_ext("ext opc opcode 0x%x unknown\n",
 							      wsi->u.ws.opcode);
 
-			wsi->u.ws.rx_user_buffer_head = 0;
+			wsi->u.ws.rx_ubuf_head = 0;
 			return 0;
 		}
 
@@ -1004,13 +1164,34 @@ ping_drop:
 		 * so it can be sent straight out again using lws_write
 		 */
 
-		eff_buf.token = &wsi->u.ws.rx_user_buffer[
-						LWS_SEND_BUFFER_PRE_PADDING];
-		eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
+		eff_buf.token = &wsi->u.ws.rx_ubuf[LWS_PRE];
+		eff_buf.token_len = wsi->u.ws.rx_ubuf_head;
 
-		if (lws_ext_cb_wsi_active_exts(wsi,
-				LWS_EXT_CALLBACK_PAYLOAD_RX, &eff_buf, 0) < 0)
+drain_extension:
+		lwsl_ext("%s: passing %d to ext\n", __func__, eff_buf.token_len);
+
+		if (wsi->state == LWSS_RETURNED_CLOSE_ALREADY ||
+		    wsi->state == LWSS_AWAITING_CLOSE_ACK)
+			goto already_done;
+
+		n = lws_ext_cb_active(wsi, LWS_EXT_CB_PAYLOAD_RX, &eff_buf, 0);
+		if (n < 0) {
+			/*
+			 * we may rely on this to get RX, just drop connection
+			 */
+			wsi->socket_is_permanently_unusable = 1;
 			return -1;
+		}
+
+		if (rx_draining_ext && eff_buf.token_len == 0)
+			goto already_done;
+
+		if (n && eff_buf.token_len) {
+			/* extension had more... main loop will come back */
+			wsi->u.ws.rx_draining_ext = 1;
+			wsi->u.ws.rx_draining_ext_list = wsi->context->rx_draining_ext_list;
+			wsi->context->rx_draining_ext_list = wsi;
+		}
 
 		if (eff_buf.token_len > 0 ||
 		    callback_action == LWS_CALLBACK_RECEIVE_PONG) {
@@ -1019,7 +1200,7 @@ ping_drop:
 			if (wsi->protocol->callback) {
 
 				if (callback_action == LWS_CALLBACK_RECEIVE_PONG)
-				    lwsl_info("Doing pong callback\n");
+					lwsl_info("Doing pong callback\n");
 
 				ret = user_callback_handle_rxflow(
 						wsi->protocol->callback,
@@ -1033,7 +1214,8 @@ ping_drop:
 				lwsl_err("No callback on payload spill!\n");
 		}
 
-		wsi->u.ws.rx_user_buffer_head = 0;
+already_done:
+		wsi->u.ws.rx_ubuf_head = 0;
 		break;
 	}
 

@@ -261,8 +261,8 @@ if left `NULL`, then the "DEFAULT" set of ciphers are all possible to select.
 Async nature of client connections
 ----------------------------------
 
-When you call `lws_client_connect(..)` and get a `wsi` back, it does not
-mean your connection is active.  It just mean it started trying to connect.
+When you call `lws_client_connect_info(..)` and get a `wsi` back, it does not
+mean your connection is active.  It just means it started trying to connect.
 
 Your client connection is actually active only when you receive
 `LWS_CALLBACK_CLIENT_ESTABLISHED` for it.
@@ -316,3 +316,19 @@ static inline int
 		    
 The user code can also override or subclass the file operations, to either
 wrap or replace them.  An example is shown in test server.
+
+ECDH Support
+------------
+
+ECDH Certs are now supported.  Enable the CMake option
+
+cmake .. -DLWS_SSL_SERVER_WITH_ECDH_CERT=1 
+
+**and** the info->options flag
+
+LWS_SERVER_OPTION_SSL_ECD
+
+to build in support and select it at runtime.
+
+
+

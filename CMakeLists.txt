@@ -65,6 +65,7 @@ option(LWS_WITHOUT_TESTAPPS "Don't build the libwebsocket-test-apps" OFF)
 option(LWS_WITHOUT_TEST_SERVER "Don't build the test server" OFF)
 option(LWS_WITHOUT_TEST_SERVER_EXTPOLL "Don't build the test server version that uses external poll" OFF)
 option(LWS_WITHOUT_TEST_PING "Don't build the ping test application" OFF)
+option(LWS_WITHOUT_TEST_ECHO "Don't build the echo test application" OFF)
 option(LWS_WITHOUT_TEST_CLIENT "Don't build the client test application" OFF)
 option(LWS_WITHOUT_TEST_FRAGGLE "Don't build the ping test application" OFF)
 option(LWS_WITHOUT_EXTENSIONS "Don't compile with extensions" OFF)
@@ -73,6 +74,8 @@ option(LWS_WITHOUT_DAEMONIZE "Don't build the daemonization api" ON)
 option(LWS_IPV6 "Compile with support for ipv6" OFF)
 option(LWS_WITH_HTTP2 "Compile with support for http2" OFF)
 option(LWS_MBED3 "Platform is MBED3" OFF)
+option(LWS_SSL_SERVER_WITH_ECDH_CERT "Include SSL server use ECDH certificate" OFF)
+
 
 if (DEFINED YOTTA_WEBSOCKETS_VERSION_STRING)
 
@@ -244,13 +247,17 @@ if (LWS_WITH_HTTP2)
 	set(LWS_USE_HTTP2 1)
 endif()
 
-if (LWS_MBED3)
-	set(CMAKE_C_FLAGS "-D_DEBUG ${CMAKE_C_FLAGS}")
-endif()
+#if (LWS_MBED3)
+#	set(CMAKE_C_FLAGS "-D_DEBUG ${CMAKE_C_FLAGS}")
+#endif()
 
 if (MINGW)
 	set(LWS_MINGW_SUPPORT 1)
 	set(CMAKE_C_FLAGS "-D__USE_MINGW_ANSI_STDIO ${CMAKE_C_FLAGS}")
+endif()
+
+if (LWS_SSL_SERVER_WITH_ECDH_CERT)
+	set(LWS_SSL_SERVER_WITH_ECDH_CERT 1)
 endif()
 
 include_directories("${PROJECT_BINARY_DIR}")
@@ -447,12 +454,10 @@ endif()
 
 if (NOT LWS_WITHOUT_EXTENSIONS)
 	list(APPEND HDR_PRIVATE
-		lib/extension-deflate-frame.h
-		lib/extension-deflate-stream.h)
+		lib/extension-permessage-deflate.h)
 	list(APPEND SOURCES
 		lib/extension.c
-		lib/extension-deflate-frame.c
-		lib/extension-deflate-stream.c)
+		lib/extension-permessage-deflate.c)
 endif()
 
 if (LWS_WITH_LIBEV)
@@ -699,7 +704,7 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 	#
 	# Helper function for adding a test app.
 	#
-	macro(create_test_app TEST_NAME MAIN_SRC S2 S3 S4)
+	macro(create_test_app TEST_NAME MAIN_SRC S2 S3 S4 S5)
 
 		set(TEST_SRCS ${MAIN_SRC})
 		set(TEST_HDR)
@@ -714,6 +719,10 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 		if ("${S4}" STREQUAL "")
 		else()
 			list(APPEND TEST_SRCS ${S4})
+		endif()
+		if ("${S5}" STREQUAL "")
+		else()
+			list(APPEND TEST_SRCS ${S5})
 		endif()
 		if (WIN32)
 			list(APPEND TEST_SRCS
@@ -772,9 +781,27 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 		# test-server
 		#
 		if (NOT LWS_WITHOUT_TEST_SERVER)
-			create_test_app(test-server "test-server/test-server.c" "test-server/test-server-http.c" "test-server/test-server-dumb-increment.c" "test-server/test-server-mirror.c")
+			create_test_app(test-server "test-server/test-server.c"
+				"test-server/test-server-http.c"
+				"test-server/test-server-dumb-increment.c"
+				"test-server/test-server-mirror.c"
+				"test-server/test-server-echogen.c")
 			if (UNIX AND NOT ((CMAKE_C_COMPILER_ID MATCHES "Clang") OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang")))
-				create_test_app(test-server-pthreads "test-server/test-server-pthreads.c" "test-server/test-server-http.c" "test-server/test-server-dumb-increment.c" "test-server/test-server-mirror.c")
+				create_test_app(test-server-pthreads
+					"test-server/test-server-pthreads.c"
+					"test-server/test-server-http.c"
+					"test-server/test-server-dumb-increment.c"
+					"test-server/test-server-mirror.c"
+					"test-server/test-server-echogen.c")
+			endif()
+			if (UNIX AND NOT ((CMAKE_C_COMPILER_ID MATCHES "Clang") OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+				AND LWS_WITH_LIBEV)
+				create_test_app(test-server-libev
+					"test-server/test-server-libev.c"
+					"test-server/test-server-http.c"
+					"test-server/test-server-dumb-increment.c"
+					"test-server/test-server-mirror.c"
+					"test-server/test-server-echogen.c")
 			endif()
 		endif()
 
@@ -782,7 +809,11 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 		# test-server-extpoll
 		#
 		if (NOT LWS_WITHOUT_TEST_SERVER_EXTPOLL)
-			create_test_app(test-server-extpoll "test-server/test-server.c" "test-server/test-server-http.c" "test-server/test-server-dumb-increment.c" "test-server/test-server-mirror.c")
+			create_test_app(test-server-extpoll "test-server/test-server.c"
+				"test-server/test-server-http.c"
+				"test-server/test-server-dumb-increment.c"
+				"test-server/test-server-mirror.c"
+				"test-server/test-server-echogen.c")
 			# Set defines for this executable only.
 			set_property(
 				TARGET test-server-extpoll
@@ -887,27 +918,27 @@ if (NOT LWS_WITHOUT_TESTAPPS)
 		# test-client
 		#
 		if (NOT LWS_WITHOUT_TEST_CLIENT)
-			create_test_app(test-client "test-server/test-client.c" "" "" "")
+			create_test_app(test-client "test-server/test-client.c" "" "" "" "")
 		endif()
 
 		#
 		# test-fraggle
 		#
 		if (NOT LWS_WITHOUT_TEST_FRAGGLE)
-			create_test_app(test-fraggle "test-server/test-fraggle.c" "" "" "")
+			create_test_app(test-fraggle "test-server/test-fraggle.c" "" "" "" "")
 		endif()
 
 		#
 		# test-ping
 		#
 		if (NOT LWS_WITHOUT_TEST_PING)
-			create_test_app(test-ping "test-server/test-ping.c" "" "" "")
+			create_test_app(test-ping "test-server/test-ping.c" "" "" "" "")
 		endif()
 		#
 		# test-echo
 		#
-		if (NOT WITHOUT_TEST_ECHO)
-			create_test_app(test-echo "test-server/test-echo.c" "" "" "")
+		if (NOT LWS_WITHOUT_TEST_ECHO)
+			create_test_app(test-echo "test-server/test-echo.c" "" "" "" "")
 		endif()
 
 	endif(NOT LWS_WITHOUT_CLIENT)
@@ -1090,6 +1121,7 @@ message(" LWS_WITHOUT_TESTAPPS = ${LWS_WITHOUT_TESTAPPS}")
 message(" LWS_WITHOUT_TEST_SERVER = ${LWS_WITHOUT_TEST_SERVER}")
 message(" LWS_WITHOUT_TEST_SERVER_EXTPOLL = ${LWS_WITHOUT_TEST_SERVER_EXTPOLL}")
 message(" LWS_WITHOUT_TEST_PING = ${LWS_WITHOUT_TEST_PING}")
+message(" LWS_WITHOUT_TEST_ECHO = ${LWS_WITHOUT_TEST_ECHO}")
 message(" LWS_WITHOUT_TEST_CLIENT = ${LWS_WITHOUT_TEST_CLIENT}")
 message(" LWS_WITHOUT_TEST_FRAGGLE = ${LWS_WITHOUT_TEST_FRAGGLE}")
 message(" LWS_WITHOUT_EXTENSIONS = ${LWS_WITHOUT_EXTENSIONS}")
@@ -1099,6 +1131,7 @@ message(" LWS_USE_LIBEV = ${LWS_USE_LIBEV}")
 message(" LWS_IPV6 = ${LWS_IPV6}")
 message(" LWS_WITH_HTTP2 = ${LWS_WITH_HTTP2}")
 message(" LWS_MBED3 = ${LWS_MBED3}")
+message(" LWS_SSL_SERVER_WITH_ECDH_CERT = ${LWS_SSL_SERVER_WITH_ECDH_CERT}")
 message("---------------------------------------------------------------------")
 
 # These will be available to parent projects including libwebsockets using add_subdirectory()

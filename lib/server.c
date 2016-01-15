@@ -111,7 +111,6 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 	else
 		info->port = ntohs(sin.sin_port);
 #endif
-
 	context->listen_port = info->port;
 
 	wsi = lws_zalloc(sizeof(struct lws));
@@ -124,6 +123,7 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 	wsi->mode = LWSCM_SERVER_LISTENER;
 	wsi->protocol = context->protocols;
 
+	context->wsi_listening = wsi;
 	if (insert_wsi_socket_into_fds(context, wsi))
 		goto bail;
 
@@ -147,38 +147,22 @@ bail:
 }
 
 int
-_lws_rx_flow_control(struct lws *wsi)
+_lws_server_listen_accept_flow_control(struct lws_context *context, int on)
 {
-	/* there is no pending change */
-	if (!(wsi->rxflow_change_to & LWS_RXFLOW_PENDING_CHANGE))
+	struct lws *wsi = context->wsi_listening;
+	int n;
+
+	if (!wsi)
 		return 0;
 
-	/* stuff is still buffered, not ready to really accept new input */
-	if (wsi->rxflow_buffer) {
-		/* get ourselves called back to deal with stashed buffer */
-		lws_callback_on_writable(wsi);
-		return 0;
-	}
+	lwsl_debug("%s: wsi %p: state %d\n", __func__, (void *)wsi, on);
 
-	/* pending is cleared, we can change rxflow state */
+	if (on)
+		n = lws_change_pollfd(wsi, 0, LWS_POLLIN);
+	else
+		n = lws_change_pollfd(wsi, LWS_POLLIN, 0);
 
-	wsi->rxflow_change_to &= ~LWS_RXFLOW_PENDING_CHANGE;
-
-	lwsl_info("rxflow: wsi %p change_to %d\n", wsi,
-			      wsi->rxflow_change_to & LWS_RXFLOW_ALLOW);
-
-	/* adjust the pollfd for this wsi */
-
-	if (wsi->rxflow_change_to & LWS_RXFLOW_ALLOW) {
-		if (lws_change_pollfd(wsi, 0, LWS_POLLIN)) {
-			lwsl_info("%s: fail\n", __func__);
-			return -1;
-		}
-	} else
-		if (lws_change_pollfd(wsi, LWS_POLLIN, 0))
-			return -1;
-
-	return 0;
+	return n;
 }
 
 int lws_http_action(struct lws *wsi)
@@ -303,7 +287,7 @@ int lws_http_action(struct lws *wsi)
 	}
 
 	/* now drop the header info we kept a pointer to */
-	lws_free_set_NULL(wsi->u.http.ah);
+	lws_free_header_table(wsi);
 
 	if (n) {
 		lwsl_info("LWS_CALLBACK_HTTP closing\n");
@@ -325,8 +309,7 @@ int lws_http_action(struct lws *wsi)
 	return 0;
 
 bail_nuke_ah:
-	/* drop the header info */
-	lws_free_set_NULL(wsi->u.hdr.ah);
+	lws_free_header_table(wsi);
 
 	return 1;
 }
@@ -370,6 +353,7 @@ int lws_handshake_server(struct lws *wsi, unsigned char **buf, size_t len)
 
 			/* expose it at the same offset as u.hdr */
 			wsi->u.http.ah = ah;
+			lwsl_debug("%s: wsi %p: ah %p\n", __func__, (void *)wsi, (void *)wsi->u.hdr.ah);
 
 			n = lws_http_action(wsi);
 
@@ -473,12 +457,9 @@ upgrade_ws:
 			lwsl_info("checking %s\n", protocol_name);
 
 			n = 0;
-			while (wsi->protocol && context->protocols[n].callback) {
-				if (!wsi->protocol->name) {
-					n++;
-					continue;
-				}
-				if (!strcmp(context->protocols[n].name,
+			while (context->protocols[n].callback) {
+				if (context->protocols[n].name &&
+				    !strcmp(context->protocols[n].name,
 					    protocol_name)) {
 					lwsl_info("prot match %d\n", n);
 					wsi->protocol = &context->protocols[n];
@@ -493,19 +474,18 @@ upgrade_ws:
 		/* we didn't find a protocol he wanted? */
 
 		if (!hit) {
-			if (!lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL)) {
-				/*
-				 * some clients only have one protocol and
-				 * do not sent the protocol list header...
-				 * allow it and match to protocol 0
-				 */
-				lwsl_info("defaulting to prot 0 handler\n");
-				wsi->protocol = &context->protocols[0];
-			} else {
-				lwsl_err("No protocol from list \"%s\" supported\n",
+			if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL)) {
+				lwsl_err("No protocol from \"%s\" supported\n",
 					 protocol_list);
 				goto bail_nuke_ah;
 			}
+			/*
+			 * some clients only have one protocol and
+			 * do not sent the protocol list header...
+			 * allow it and match to protocol 0
+			 */
+			lwsl_info("defaulting to prot 0 handler\n");
+			wsi->protocol = &context->protocols[0];
 		}
 
 		/* allocate wsi->user storage */
@@ -524,7 +504,6 @@ upgrade_ws:
 			lwsl_warn("User code denied connection\n");
 			goto bail_nuke_ah;
 		}
-
 
 		/*
 		 * Perform the handshake according to the protocol version the
@@ -560,12 +539,13 @@ upgrade_ws:
 		n = wsi->protocol->rx_buffer_size;
 		if (!n)
 			n = LWS_MAX_SOCKET_IO_BUF;
-		n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-		wsi->u.ws.rx_user_buffer = lws_malloc(n);
-		if (!wsi->u.ws.rx_user_buffer) {
+		n += LWS_PRE;
+		wsi->u.ws.rx_ubuf = lws_malloc(n + 4 /* 0x0000ffff zlib */);
+		if (!wsi->u.ws.rx_ubuf) {
 			lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 			return 1;
 		}
+		wsi->u.ws.rx_ubuf_alloc = n;
 		lwsl_info("Allocating RX buffer %d\n", n);
 #if LWS_POSIX
 		if (setsockopt(wsi->sock, SOL_SOCKET, SO_SNDBUF,
@@ -649,6 +629,7 @@ lws_create_new_server_wsi(struct lws_context *context)
 LWS_VISIBLE
 int lws_http_transaction_completed(struct lws *wsi)
 {
+	lwsl_debug("%s: wsi %p\n", __func__, wsi);
 	/* if we can't go back to accept new headers, drop the connection */
 	if (wsi->u.http.connection_type != HTTP_CONNECTION_KEEP_ALIVE) {
 		lwsl_info("%s: close connection\n", __func__);
@@ -713,7 +694,7 @@ int lws_server_socket_service(struct lws_context *context,
 
 		/* any incoming data ready? */
 
-		if (!(pollfd->revents & LWS_POLLIN))
+		if (!(pollfd->revents & pollfd->events && LWS_POLLIN))
 			goto try_pollout;
 
 		len = lws_ssl_capable_read(wsi, context->serv_buf,
@@ -896,11 +877,9 @@ LWS_VISIBLE int lws_serve_http_file(struct lws *wsi, const char *file,
 				    int other_headers_len)
 {
 	struct lws_context *context = lws_get_context(wsi);
-	unsigned char *response = context->serv_buf +
-				  LWS_SEND_BUFFER_PRE_PADDING;
+	unsigned char *response = context->serv_buf + LWS_PRE;
 	unsigned char *p = response;
-	unsigned char *end = p + sizeof(context->serv_buf) -
-			     LWS_SEND_BUFFER_PRE_PADDING;
+	unsigned char *end = p + sizeof(context->serv_buf) - LWS_PRE;
 	int ret = 0;
 
 	wsi->u.http.fd = lws_plat_file_open(wsi, file, &wsi->u.http.filelen,
@@ -949,26 +928,32 @@ LWS_VISIBLE int lws_serve_http_file(struct lws *wsi, const char *file,
 }
 
 int
-lws_interpret_incoming_packet(struct lws *wsi, unsigned char *buf, size_t len)
+lws_interpret_incoming_packet(struct lws *wsi, unsigned char **buf, size_t len)
 {
-	size_t n = 0;
 	int m;
 
+	lwsl_parser("%s: received %d byte packet\n", __func__, (int)len);
 #if 0
-	lwsl_parser("received %d byte packet\n", (int)len);
-	lwsl_hexdump(buf, len);
+	lwsl_hexdump(*buf, len);
 #endif
 
 	/* let the rx protocol state machine have as much as it needs */
 
-	while (n < len) {
+	while (len) {
 		/*
 		 * we were accepting input but now we stopped doing so
 		 */
 		if (!(wsi->rxflow_change_to & LWS_RXFLOW_ALLOW)) {
-			lws_rxflow_cache(wsi, buf, n, len);
-
+			lws_rxflow_cache(wsi, *buf, 0, len);
+			lwsl_parser("%s: cached %d\n", __func__, len);
 			return 1;
+		}
+
+		if (wsi->u.ws.rx_draining_ext) {
+			m = lws_rx_sm(wsi, 0);
+			if (m < 0)
+				return -1;
+			continue;
 		}
 
 		/* account for what we're using in rxflow buffer */
@@ -976,10 +961,13 @@ lws_interpret_incoming_packet(struct lws *wsi, unsigned char *buf, size_t len)
 			wsi->rxflow_pos++;
 
 		/* process the byte */
-		m = lws_rx_sm(wsi, buf[n++]);
+		m = lws_rx_sm(wsi, *(*buf)++);
 		if (m < 0)
 			return -1;
+		len--;
 	}
+
+	lwsl_parser("%s: exit with %d unused\n", __func__, (int)len);
 
 	return 0;
 }

@@ -101,8 +101,9 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 	int n;
 	int m;
 	char buf;
+	struct lws *wsi;
 #ifdef LWS_OPENSSL_SUPPORT
-	struct lws *wsi, *wsi_next;
+	struct lws *wsi_next;
 #endif
 
 	/* stay dead once we are dead */
@@ -112,21 +113,36 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 
 	lws_libev_run(context);
 
-	context->service_tid = context->protocols[0].callback(NULL,
-				     LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
+	if (!context->service_tid_detected) {
+		struct lws _lws;
+
+		memset(&_lws, 0, sizeof(_lws));
+		_lws.context = context;
+
+		context->service_tid_detected = context->protocols[0].callback(
+			&_lws, LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
+	}
+	context->service_tid = context->service_tid_detected;
+
+	/* if we know we are draining rx ext, do not wait in poll */
+	if (context->rx_draining_ext_list)
+		timeout_ms = 0;
 
 #ifdef LWS_OPENSSL_SUPPORT
 	/* if we know we have non-network pending data, do not wait in poll */
-	if (lws_ssl_anybody_has_buffered_read(context))
+	if (lws_ssl_anybody_has_buffered_read(context)) {
 		timeout_ms = 0;
+		lwsl_err("ssl buffered read\n");
+	}
 #endif
+
 	n = poll(context->fds, context->fds_count, timeout_ms);
-	context->service_tid = 0;
 
 #ifdef LWS_OPENSSL_SUPPORT
-	if (!lws_ssl_anybody_has_buffered_read(context) && n == 0) {
+	if (!context->rx_draining_ext_list &&
+	    !lws_ssl_anybody_has_buffered_read(context) && n == 0) {
 #else
-	if (n == 0) /* poll timeout */ {
+	if (!context->rx_draining_ext_list && n == 0) /* poll timeout */ {
 #endif
 		lws_service_fd(context, NULL);
 		return 0;
@@ -136,6 +152,17 @@ lws_plat_service(struct lws_context *context, int timeout_ms)
 		if (LWS_ERRNO != LWS_EINTR)
 			return -1;
 		return 0;
+	}
+
+	/*
+	 * For all guys with already-available ext data to drain, if they are
+	 * not flowcontrolled, fake their POLLIN status
+	 */
+	wsi = context->rx_draining_ext_list;
+	while (wsi) {
+		context->fds[wsi->position_in_fds_table].revents |=
+			context->fds[wsi->position_in_fds_table].events & POLLIN;
+		wsi = wsi->u.ws.rx_draining_ext_list;
 	}
 
 #ifdef LWS_OPENSSL_SUPPORT
@@ -193,7 +220,9 @@ lws_plat_set_socket_options(struct lws_context *context, int fd)
 	int optval = 1;
 	socklen_t optlen = sizeof(optval);
 
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+#if defined(__APPLE__) || \
+    defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || \
+    defined(__NetBSD__) || \
     defined(__OpenBSD__)
 	struct protoent *tcp_proto;
 #endif
@@ -205,7 +234,9 @@ lws_plat_set_socket_options(struct lws_context *context, int fd)
 			       (const void *)&optval, optlen) < 0)
 			return 1;
 
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+#if defined(__APPLE__) || \
+    defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || \
+    defined(__NetBSD__) || \
         defined(__CYGWIN__) || defined(__OpenBSD__)
 
 		/*
@@ -233,7 +264,9 @@ lws_plat_set_socket_options(struct lws_context *context, int fd)
 
 	/* Disable Nagle */
 	optval = 1;
-#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
+#if !defined(__APPLE__) && \
+    !defined(__FreeBSD__) && !defined(__FreeBSD_kernel__) && \
+    !defined(__NetBSD__) && \
     !defined(__OpenBSD__)
 	if (setsockopt(fd, SOL_TCP, TCP_NODELAY, (const void *)&optval, optlen) < 0)
 		return 1;
@@ -490,6 +523,9 @@ lws_plat_init(struct lws_context *context,
 		return 1;
 	}
 
+	lwsl_notice(" mem: platform fd map: %5u bytes\n",
+		    sizeof(struct lws *) * context->max_fds);
+
 	context->fd_random = open(SYSTEM_RANDOM_FILEPATH, O_RDONLY);
 	if (context->fd_random < 0) {
 		lwsl_err("Unable to open random device %s %d\n",
@@ -497,13 +533,13 @@ lws_plat_init(struct lws_context *context,
 		return 1;
 	}
 
-	if (lws_libev_init_fd_table(context))
-		/* libev handled it instead */
-		return 0;
+	if (!lws_libev_init_fd_table(context)) {
+		/* otherwise libev handled it instead */
 
-	if (pipe(context->dummy_pipe_fds)) {
-		lwsl_err("Unable to create pipe\n");
-		return 1;
+		if (pipe(context->dummy_pipe_fds)) {
+			lwsl_err("Unable to create pipe\n");
+			return 1;
+		}
 	}
 
 	/* use the read end of pipe as first item */
