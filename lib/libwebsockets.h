@@ -272,6 +272,7 @@ enum lws_context_options {
 	LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED		= (1 << 7),
 	LWS_SERVER_OPTION_VALIDATE_UTF8				= (1 << 8),
 	LWS_SERVER_OPTION_SSL_ECDH				= (1 << 9),
+	LWS_SERVER_OPTION_UNIX_SOCK				= (1 << 9),
 
 	/****** add new things just above ---^ ******/
 };
@@ -1229,7 +1230,7 @@ struct lws_extension {
 	 * This is part of the ABI, don't needlessly break compatibilty */
 };
 
-/* 
+/*
  * The internal exts are part of the public abi
  * If we add more extensions, publish the callback here
  */
